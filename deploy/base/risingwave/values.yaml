@@ -1,0 +1,75 @@
+image:
+  repository: risingwavelabs/risingwave
+  tag: v2.7.1
+
+metaComponent:
+  replicas: 3
+  resources:
+    limits:
+      cpu: "1"
+      memory: "2Gi"
+    requests:
+      cpu: "1"
+      memory: "1Gi"
+
+computeComponent:
+  replicas: 2
+  resources:
+    limits:
+      cpu: "2"
+      memory: "4Gi"
+
+    requests:
+      cpu: "1"
+      memory: "2Gi"
+
+  extraVolumes:
+    - name: schema-storage
+      configMap:
+        name: rw-proto-schema
+  extraVolumeMounts:
+    - name: schema-storage
+      mountPath: /etc/risingwave/schemas
+      readOnly: true
+
+frontend:
+  replicas: 1
+  resources:
+    limits:
+      cpu: "1"
+      memory: "1Gi"
+    requests:
+      cpu: "100m"
+      memory: "500m"
+  extraVolumes:
+    - name: schema-storage
+      configMap:
+        name: rw-proto-schema
+  extraVolumeMounts:
+    - name: schema-storage
+      mountPath: /etc/risingwave/schemas
+      readOnly: true
+
+compactor:
+  replicas: 1
+  resources:
+    limits: { cpu: "1", memory: "1Gi" }
+    requests: { cpu: "100m", memory: "256M" }
+
+metaStore:
+  postgresql:
+    enabled: true
+    host: pg-cluster-rw.cnpg-system.svc.cluster.local
+    port: 5432
+    database: risingwave
+    authentication:
+      existingSecretName: rw-metastore-secret
+
+stateStore:
+  minio:
+    enabled: true
+    endpoint: "rustfs-svc.rustfs.svc.cluster.local:9000"
+    bucket: hummock001
+    use_ssl: false
+    authentication:
+      existingSecretName: rustfs-secret

@@ -1,0 +1,26 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: risingwave
+  namespace: argocd
+spec:
+  project: default
+  sources:
+    - repoURL: "https://github.com/cunialino/crypto-lakehouse.git"
+      targetRevision: main
+      path: deploy/base/risingwave
+      ref: myrepo
+    - repoURL: "https://risingwavelabs.github.io/helm-charts/"
+      chart: risingwave
+      targetRevision: 0.2.47
+      helm:
+        valueFiles: 
+          - $myrepo/deploy/base/risingwave/values.yaml
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: risingwave
+  syncPolicy:
+    automated:
+      enabled: false
+    syncOptions:
+      - CreateNamespace=true

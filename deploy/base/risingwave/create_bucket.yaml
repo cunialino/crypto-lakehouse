@@ -1,0 +1,36 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: bucket-setup
+  namespace: risingwave
+spec:
+  backoffLimit: 5 
+  template:
+    spec:
+      restartPolicy: OnFailure
+      containers:
+      - name: mc-bucket-creator
+        image: minio/mc:latest 
+        env:
+        - name: BUCKET
+          value: hummock001
+
+        - name: RUSTFS_ENDPOINT
+          value: "http://rustfs-svc.rustfs.svc.cluster.local:9000"
+
+        - name: RUSTFS_ROOT_USER
+          valueFrom:
+            secretKeyRef:
+              name: rustfs-secret
+              key: MINIO_USERNAME
+        - name: RUSTFS_ROOT_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: rustfs-secret
+              key: MINIO_PASSWORD
+
+        command: ["/bin/sh", "-c"]
+        args:
+          - |
+            mc alias set rustfs $RUSTFS_ENDPOINT $RUSTFS_ROOT_USER $RUSTFS_ROOT_PASSWORD;
+            mc mb rustfs/$BUCKET --ignore-existing;
