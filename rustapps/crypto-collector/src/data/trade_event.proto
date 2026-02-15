@@ -1,0 +1,15 @@
+syntax = "proto3";
+
+package trade.data;
+
+message TradeEventProto {
+  uint64 event_time = 1;
+  string symbol = 2;
+  string exchange = 3;
+  uint64 trade_id = 4;
+  double price = 5;
+  double quantity = 6;
+  uint64 trade_time = 7;
+  bool is_buyer_maker = 8;
+  bool is_best_price_match = 9;
+}
