@@ -1,0 +1,33 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/yannh/kubernetes-json-schema/refs/heads/master/v1.34.3/deployment.json
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: binance-collector
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: binance-collector
+  template:
+    metadata:
+      labels:
+        app: binance-collector
+    spec:
+      nodeSelector:
+        internet: "true"
+
+      containers:
+        - name: binance-collector
+          image: custom.io/binance-rs:v0.1.9
+          imagePullPolicy: Always
+          env:
+            - name: NATS_URL
+              value: nats://nats-cluster.nats.svc.cluster.local:4222
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "512Mi"
+            limits:
+              cpu: "1000m"
+              memory: "2Gi"

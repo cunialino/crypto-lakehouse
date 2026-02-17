@@ -1,0 +1,10 @@
+apiVersion: jetstream.nats.io/v1beta2
+kind: Stream
+metadata:
+  name: tradesstream
+spec:
+  name: tradesstream
+  subjects: ["exchange.*"]
+  storage: file
+  maxAge: 72h
+  replicas: 3

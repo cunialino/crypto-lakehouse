@@ -1,0 +1,19 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: crypto-lakehouse-collector
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: "https://github.com/cunialino/crypto-lakehouse.git"
+    targetRevision: HEAD
+    path: deploy/base/collector
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: crypto-collector
+  syncPolicy:
+    automated:
+      enabled: false
+    syncOptions:
+      - CreateNamespace=true
