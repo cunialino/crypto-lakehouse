@@ -1,0 +1,40 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: arc-runners-crypto
+  namespace: argocd
+spec:
+  project: default
+  source:
+    chart: gha-runner-scale-set
+    repoURL: ghcr.io/actions/actions-runner-controller-charts
+    targetRevision: 0.13.1
+    helm:
+      values: |
+        githubConfigUrl: "https://github.com/cunialino/crypto-lakehouse"
+        githubConfigSecret: arc-runner-auth
+        runnerScaleSetName: "homelab-runner-crypto"
+        containerMode:
+          type: "kubernetes"
+          kubernetesModeWorkVolumeClaim:
+            accessModes: ["ReadWriteOnce"]
+            storageClassName: "longhorn" 
+            resources:
+              requests:
+                storage: 1Gi
+        template:
+          spec:
+            securityContext:
+              fsGroup: 1001
+        controllerServiceAccount:
+          name: arc-runners-gha-rs-controller
+          namespace: arc-runners
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: arc-runners
+  syncPolicy:
+    automated:
+      enabled: false
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
