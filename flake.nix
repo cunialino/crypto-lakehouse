@@ -53,7 +53,11 @@
           mkShell {
             nativeBuildInputs = [
               pkgs.pkg-config
+              pkgs.python3
             ];
+            env = {
+              UV_PYTHON = "${pkgs.python3}";
+            };
             buildInputs = [
               rustToolchain
               pkgs.rust-analyzer
