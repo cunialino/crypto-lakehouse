@@ -1,0 +1,23 @@
+name: ARC Crypto Builder
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-deploy:
+    runs-on: homelab-runner-crypto
+    container:
+      image: alpine:latest
+    steps:
+      - name: Install dependencies
+        run: apk add --no-cache nix git tar podman
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build image
+        run: podman build rustapps/crypto-collector/ -f rustapps/crypto-collector/Dockerfile -t localhost:5000/binance-rs:v0.2.0

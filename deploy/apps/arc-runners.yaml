@@ -5,30 +5,17 @@ metadata:
   namespace: argocd
 spec:
   project: default
-  source:
-    chart: gha-runner-scale-set
-    repoURL: ghcr.io/actions/actions-runner-controller-charts
-    targetRevision: 0.13.1
-    helm:
-      values: |
-        githubConfigUrl: "https://github.com/cunialino/crypto-lakehouse"
-        githubConfigSecret: arc-runner-auth
-        runnerScaleSetName: "homelab-runner-crypto"
-        containerMode:
-          type: "kubernetes"
-          kubernetesModeWorkVolumeClaim:
-            accessModes: ["ReadWriteOnce"]
-            storageClassName: "longhorn" 
-            resources:
-              requests:
-                storage: 1Gi
-        template:
-          spec:
-            securityContext:
-              fsGroup: 1001
-        controllerServiceAccount:
-          name: arc-runners-gha-rs-controller
-          namespace: arc-runners
+  sources:
+    - repoURL: "https://github.com/cunialino/crypto-lakehouse.git"
+      targetRevision: main
+      path: deploy/base/runners
+      ref: myrepo
+    - chart: gha-runner-scale-set
+      repoURL: ghcr.io/actions/actions-runner-controller-charts
+      targetRevision: 0.13.1
+      helm:
+        valueFiles: 
+          - $myrepo/deploy/base/runners/values.yaml
   destination:
     server: https://kubernetes.default.svc
     namespace: arc-runners

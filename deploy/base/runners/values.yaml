@@ -1,0 +1,55 @@
+githubConfigUrl: "https://github.com/cunialino/crypto-lakehouse"
+githubConfigSecret: arc-runner-auth
+runnerScaleSetName: "homelab-runner-crypto"
+containerMode:
+  type: "kubernetes"
+  kubernetesModeWorkVolumeClaim:
+    accessModes: ["ReadWriteOnce"]
+    storageClassName: "longhorn"
+    resources:
+      requests:
+        storage: "2Gi"
+template:
+  spec:
+    securityContext:
+      fsGroup: 1001
+      fsGroupChangePolicy: "Always"
+    initContainers:
+      - name: setup-podman
+        image: quay.io/podman/stable:latest
+        command: ["/bin/sh", "-c"]
+        # This ensures a fresh, correct storage.conf exists before Podman starts
+        args:
+          - |
+            mkdir -p /home/runner/.config/containers
+            cat <<EOF > /home/runner/.config/containers/storage.conf
+            [storage]
+            driver = "overlay"
+            [storage.options.overlay]
+            mount_program = "/usr/bin/fuse-overlayfs"
+            EOF
+            chown -R 1001:1001 /home/runner/.config
+        volumeMounts:
+          - name: work
+            mountPath: /home/runner/_work
+    containers:
+      - name: runner
+        image: custom.io/builder:0.1.0
+        command: ["/home/runner/run.sh"]
+        securityContext:
+          capabilities:
+            add: ["SETGID", "SETUID"]
+        env:
+          - name: STORAGE_DRIVER
+            value: "vfs"
+        volumeMounts:
+          - name: fuse-device
+            mountPath: /dev/fuse
+    volumes:
+      - name: fuse-device
+        hostPath:
+          path: /dev/fuse
+
+controllerServiceAccount:
+  name: arc-runners-gha-rs-controller
+  namespace: arc-runners
