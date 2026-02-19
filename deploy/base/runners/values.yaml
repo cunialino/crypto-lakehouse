@@ -1,0 +1,66 @@
+githubConfigUrl: "https://github.com/cunialino/crypto-lakehouse"
+githubConfigSecret: arc-runner-auth
+runnerScaleSetName: "homelab-runner-crypto"
+containerMode:
+  type: "kubernetes"
+  kubernetesModeWorkVolumeClaim:
+    accessModes: ["ReadWriteOnce"]
+    storageClassName: "longhorn"
+    resources:
+      requests:
+        storage: "2Gi"
+
+listenerTemplate:
+  spec:
+    containers:
+      - name: listener
+        resources:
+          requests:
+            cpu: "100m"
+            memory: "128Mi"
+          limits:
+            cpu: "200m"
+            memory: "256Mi"
+
+template:
+  spec:
+    hostUsers: false 
+    securityContext:
+      fsGroup: 1000
+      runAsUser: 1000
+      runAsGroup: 1000
+
+    containers:
+      - name: runner
+        image: custom.io/builder:0.1.0
+        command: ["/home/runner/run.sh"]
+        resources:
+          requests:
+            cpu: "500m"
+            memory: "512Mi"
+          limits:
+            cpu: "1000m"
+            memory: "1Gi"
+        securityContext:
+          runAsUser: 1000
+          runAsGroup: 1000
+          capabilities:
+            add: ["SETFCAP"] 
+
+        volumeMounts:
+            - name: storage
+              mountPath: /storage
+            - name: storage-conf
+              mountPath: /etc/containers/storage.conf
+              subPath: storage.conf
+    volumes:
+        - name: storage
+          emptyDir:
+            sizeLimit: 2Gi
+        - name: storage-conf
+          configMap:
+            name: podman-storage-config
+
+controllerServiceAccount:
+  name: arc-runners-gha-rs-controller
+  namespace: arc-runners

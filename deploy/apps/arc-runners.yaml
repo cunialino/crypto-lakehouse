@@ -1,0 +1,27 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: arc-runners-crypto
+  namespace: argocd
+spec:
+  project: default
+  sources:
+    - repoURL: "https://github.com/cunialino/crypto-lakehouse.git"
+      targetRevision: main
+      path: deploy/base/runners
+      ref: myrepo
+    - chart: gha-runner-scale-set
+      repoURL: ghcr.io/actions/actions-runner-controller-charts
+      targetRevision: 0.13.1
+      helm:
+        valueFiles: 
+          - $myrepo/deploy/base/runners/values.yaml
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: arc-runners
+  syncPolicy:
+    automated:
+      enabled: false
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
