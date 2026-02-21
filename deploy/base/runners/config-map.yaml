@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: podman-storage-config
+  namespace: arc-runners
+data:
+  storage.conf: |
+    [storage]
+    driver = "overlay"
+    # These paths ensure Podman uses the emptyDir volume instead of the container root
+    runroot = "/var/lib/containers/storage"
+    graphroot = "/var/lib/containers/storage"
+    [storage.options.overlay]
+    # In a User Namespace, we can finally use the native kernel driver!
+    # No mount_program needed.

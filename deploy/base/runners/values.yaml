@@ -9,46 +9,45 @@ containerMode:
     resources:
       requests:
         storage: "2Gi"
+
 template:
   spec:
+    hostUsers: false 
+
     securityContext:
-      fsGroup: 1001
-      fsGroupChangePolicy: "Always"
-    initContainers:
-      - name: setup-podman
-        image: quay.io/podman/stable:latest
-        command: ["/bin/sh", "-c"]
-        # This ensures a fresh, correct storage.conf exists before Podman starts
-        args:
-          - |
-            mkdir -p /home/runner/.config/containers
-            cat <<EOF > /home/runner/.config/containers/storage.conf
-            [storage]
-            driver = "overlay"
-            [storage.options.overlay]
-            mount_program = "/usr/bin/fuse-overlayfs"
-            EOF
-            chown -R 1001:1001 /home/runner/.config
-        volumeMounts:
-          - name: work
-            mountPath: /home/runner/_work
+      fsGroup: 1000
+      runAsUser: 1000
+      runAsGroup: 1000
+
     containers:
       - name: runner
-        image: custom.io/builder:0.1.0
+        # Use an image with Podman pre-installed (or your custom build)
+        image: quay.io/podman/stable:latest 
         command: ["/home/runner/run.sh"]
         securityContext:
+          # We no longer need 'privileged: true' or 'SYS_ADMIN'!
+          privileged: false
+          allowPrivilegeEscalation: false
           capabilities:
-            add: ["SETGID", "SETUID"]
+            drop:
+              - ALL
         env:
           - name: STORAGE_DRIVER
-            value: "vfs"
+            value: "overlay"
         volumeMounts:
-          - name: fuse-device
-            mountPath: /dev/fuse
+          - name: storage
+            mountPath: /var/lib/containers/storage
+          - name: storage-conf
+            mountPath: /etc/containers/storage.conf
+            subPath: storage.conf
+
     volumes:
-      - name: fuse-device
-        hostPath:
-          path: /dev/fuse
+      - name: storage
+        emptyDir:
+          sizeLimit: 10Gi
+      - name: storage-conf
+        configMap:
+          name: podman-storage-config
 
 controllerServiceAccount:
   name: arc-runners-gha-rs-controller
