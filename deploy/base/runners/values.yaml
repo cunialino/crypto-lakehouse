@@ -21,8 +21,7 @@ template:
 
     containers:
       - name: runner
-        # Use an image with Podman pre-installed (or your custom build)
-        image: quay.io/podman/stable:latest 
+        image: custom.io/builder:0.1.0
         command: ["/home/runner/run.sh"]
         securityContext:
           # We no longer need 'privileged: true' or 'SYS_ADMIN'!
