@@ -23,20 +23,20 @@
         };
         rustToolchain = pkgs.rust-bin.beta.latest.default;
         buildInputs = [
-          pkgs.pkgsStatic.openssl
+          pkgs.openssl
         ];
         nativeBuildInputs = [
           pkgs.pkg-config
         ];
       in
-      {
-        packages.default = pkgs.pkgsStatic.rustPlatform.buildRustPackage {
+      let
+        cryptoCollector = pkgs.rustPlatform.buildRustPackage {
           pname = "crypto-collector";
           version = "0.1.0";
           cargoLock = {
-            lockFile = ./Cargo.lock;
+            lockFile = ./rustapps/crypto-collector/Cargo.lock;
           };
-          src = ./.;
+          src = ./rustapps/crypto-collector;
           cargoPatches = [ ];
           cargoCheckPaths = [
             "src"
@@ -46,6 +46,25 @@
           inherit buildInputs;
           inherit nativeBuildInputs;
           PROTOC = "${pkgs.protobuf}/bin/protoc";
+        };
+      in
+      {
+        packages.default = cryptoCollector;
+
+        packages.docker = pkgs.dockerTools.buildImage {
+          name = "crypto-collector";
+          tag = "latest";
+          copyToRoot = pkgs.buildEnv {
+            name = "docker-rootfs";
+            paths = [
+              cryptoCollector
+              pkgs.openssl
+              pkgs.stdenv.cc.cc.lib
+            ];
+          };
+          config = {
+            Entrypoint = [ "${cryptoCollector}/bin/crypto-collector" ];
+          };
         };
 
         devShells.default =
