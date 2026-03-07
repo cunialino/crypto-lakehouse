@@ -1,0 +1,33 @@
+name: ARC Crypto Builder
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-deploy:
+    runs-on: homelab-runner-crypto
+    container:
+      image: alpine:latest
+      env:
+        STORAGE_DRIVER: vfs
+    steps:
+      - name: Install dependencies
+        run: apk add --no-cache nix git tar
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build image
+        run: git config --global --add safe.directory $(pwd) && nix build --extra-experimental-features 'nix-command flakes' .#docker
+
+      - name: Push image
+        env:
+          BASE: 192.168.0.2:5000/crypto-collector
+          TAG: ${{ github.ref_name }}
+        run: |
+          nix run --extra-experimental-features 'nix-command flakes' nixpkgs#skopeo -- copy --insecure-policy --dest-tls-verify=false docker-archive:"$(readlink result)" docker://$BASE:$TAG
+          nix run --extra-experimental-features 'nix-command flakes' nixpkgs#skopeo -- copy --insecure-policy --dest-tls-verify=false docker-archive:"$(readlink result)" docker://$BASE:latest
