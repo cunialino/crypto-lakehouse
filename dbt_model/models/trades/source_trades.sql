@@ -18,5 +18,7 @@ WITH (
 )
 FORMAT PLAIN ENCODE PROTOBUF (
     message='trade.data.TradeEventProto',
-    schema.location='file:///etc/risingwave/schemas/trade_schema.pb'
+    schema.location = 's3://hummock001/extra_files/trade_schema.pb',
+    region = 'eu-lambronx-1', 
+    s3.endpoint_url = 'http://rustfs-svc.rustfs.svc.cluster.local:9000',
 );

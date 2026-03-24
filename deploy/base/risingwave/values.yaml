@@ -14,6 +14,7 @@ metaComponent:
 
 computeComponent:
   replicas: 2
+  extraEnvVarsSecret: rustfs-secret
   resources:
     limits:
       cpu: "2"
@@ -34,6 +35,7 @@ computeComponent:
 
 frontendComponent:
   replicas: 1
+  extraEnvVarsSecret: rustfs-secret
   resources:
     requests:
       cpu: "100m"
@@ -66,10 +68,11 @@ metaStore:
       existingSecretName: rw-metastore-secret
 
 stateStore:
-  minio:
+  s3:
     enabled: true
-    endpoint: "rustfs-svc.rustfs.svc.cluster.local:9000"
+    endpoint: "http://rustfs-svc.rustfs.svc.cluster.local:9000"
     bucket: hummock001
-    use_ssl: false
+    region: "eu-lambronx-1"
+    forcePathStyle: true
     authentication:
       existingSecretName: rustfs-secret
