@@ -5,12 +5,12 @@ image:
 metaComponent:
   replicas: 3
   resources:
-    limits:
-      cpu: "1"
-      memory: "2Gi"
     requests:
-      cpu: "1"
-      memory: "1Gi"
+      cpu: "100m"
+      memory: "128Mi"
+    limits:
+      cpu: "500m"
+      memory: "512Mi"
 
 computeComponent:
   replicas: 2
@@ -35,12 +35,12 @@ computeComponent:
 frontendComponent:
   replicas: 1
   resources:
-    limits:
-      cpu: "1"
-      memory: "1Gi"
     requests:
       cpu: "100m"
-      memory: "500M"
+      memory: "128Mi"
+    limits:
+      cpu: "500m"
+      memory: "512Mi"
   extraVolumes:
     - name: schema-storage
       configMap:
