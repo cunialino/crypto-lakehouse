@@ -1,0 +1,15 @@
+apiVersion: cluster.redpanda.com/v1alpha2
+kind: Topic
+metadata:
+  name: exchange
+  namespace: redpanda
+  annotations:
+    argocd.argoproj.io/sync-wave: "6" 
+spec:
+  partitions: 1
+  replicationFactor: 3
+  kafkaApiSpec:
+    brokers:
+      - "redpanda-0.redpanda.redpanda.svc.cluster.local:9093"
+      - "redpanda-1.redpanda.redpanda.svc.cluster.local:9093"
+      - "redpanda-2.redpanda.redpanda.svc.cluster.local:9093"

@@ -1,6 +1,12 @@
 pub(crate) mod binance_web_socket;
+use std::time::Duration;
+
 use anyhow::Context;
 use futures::stream::SplitStream;
+use rdkafka::{
+    producer::{FutureProducer, FutureRecord},
+    util::Timeout,
+};
 use tokio::net::TcpStream;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, tungstenite::Utf8Bytes};
 
@@ -16,6 +22,8 @@ pub mod snazzy {
 
 use snazzy::items::TradeEventProto;
 
+const TOPIC: &str = "exchange";
+
 type MyStream = SplitStream<WebSocketStream<MaybeTlsStream<TcpStream>>>;
 
 pub(crate) trait Exchange<T: for<'de> serde::Deserialize<'de> + Into<TradeEventProto>>:
@@ -25,32 +33,33 @@ pub(crate) trait Exchange<T: for<'de> serde::Deserialize<'de> + Into<TradeEventP
     fn handle_message(
         &self,
         message_txt: Utf8Bytes,
-        js: &async_nats::jetstream::Context,
+        producer: &FutureProducer,
     ) -> impl std::future::Future<Output = ()> + Send {
+        let producer = producer.clone();
+
         async move {
             let my_data: T = serde_json::from_slice(message_txt.as_bytes()).unwrap();
-            let subject = format!("exchange.{}", self.name());
             let proto: TradeEventProto = my_data.into();
             let mut buf = Vec::with_capacity(proto.encoded_len());
 
-            proto
-                .encode(&mut buf)
-                .map_err(|e| {
-                    eprintln!("Failed to encode: {}", e);
-                })
-                .unwrap();
-            match js.publish(subject.to_string(), buf.into()).await {
-                Ok(ack) => match ack.await {
-                    Ok(_) => {}
-                    Err(e) => {
-                        tracing::error!("NATS ack failed: {:?}", e);
-                    }
-                },
-                Err(e) => {
-                    eprintln!("failed to publish to {}: {:?}", subject, e);
+            proto.encode(&mut buf).unwrap();
+
+            let record = FutureRecord::to(TOPIC).payload(&buf).key(self.name());
+            match producer
+                .send(record, Timeout::After(Duration::from_secs(5)))
+                .await
+            {
+                Ok(delivery) => {
+                    tracing::debug!(
+                        "Delivered to partition {} at offset {}",
+                        delivery.partition,
+                        delivery.offset
+                    );
+                }
+                Err((e, _)) => {
+                    tracing::error!("Redpanda publish failed to {}: {:?}", TOPIC, e);
                 }
             }
-            ()
         }
     }
     fn connection_manager(
@@ -59,13 +68,19 @@ pub(crate) trait Exchange<T: for<'de> serde::Deserialize<'de> + Into<TradeEventP
     ) -> impl std::future::Future<Output = anyhow::Result<()>> + Send + 'static;
     fn the_big_loop(
         &self,
-        js: &async_nats::jetstream::Context,
+        producer: &FutureProducer,
     ) -> impl std::future::Future<Output = anyhow::Result<()>> + Send {
         tracing::debug!("Starting {} big loop", self.name());
         async move {
             let (send, mut recv) = tokio::sync::mpsc::channel(1);
-            let _ = tokio::spawn(self.connection_manager(send));
-            let mut read = recv.recv().await.context("Could init reader")?;
+            let fut = self.connection_manager(send);
+            tokio::spawn(async move {
+                match fut.await {
+                    Ok(()) => {}
+                    Err(e) => tracing::error!("Connection manager failed: {e:?}"),
+                }
+            });
+            let mut read = recv.recv().await.context("Could not init reader")?;
             loop {
                 tokio::select! {
                     new_read = recv.recv() => {
@@ -82,11 +97,11 @@ pub(crate) trait Exchange<T: for<'de> serde::Deserialize<'de> + Into<TradeEventP
                             Some(msg) => {
                                 match msg {
                                     Ok(tokio_tungstenite::tungstenite::Message::Text(txt)) => {
-                                        self.handle_message(txt, js).await;
+                                        self.handle_message(txt, producer).await;
                                     },
                                     Ok(_) => {},
                                     Err(e) => {
-                                        eprintln!("websocket error: {}", e);
+                                        tracing::error!("websocket error: {}", e);
                                         break;
                                     }
                                 }

@@ -95,7 +95,7 @@ impl Exchange<TradeEventBinance> for BinanceExhange {
                 let (ws, _) = connect_async(url).await?;
                 let (_, read) = ws.split();
                 tracing::info!("Connection to ws set");
-                let _ = sender.send(read).await;
+                sender.send(read).await?;
                 tracing::info!("Connection manager going to sleep");
                 tokio::time::sleep(CONNECTION_TIMEOUT).await;
             }
