@@ -50,16 +50,10 @@ template:
         volumeMounts:
             - name: storage
               mountPath: /storage
-            - name: storage-conf
-              mountPath: /etc/containers/storage.conf
-              subPath: storage.conf
     volumes:
         - name: storage
           emptyDir:
             sizeLimit: 2Gi
-        - name: storage-conf
-          configMap:
-            name: podman-storage-config
 
 controllerServiceAccount:
   name: arc-runners-gha-rs-controller
