@@ -70,7 +70,7 @@ metaStore:
 stateStore:
   s3:
     enabled: true
-    endpoint: "http://rustfs-svc.rustfs.svc.cluster.local:9000"
+    endpoint: "http://garage-svc.garage.svc.cluster.local:3900"
     bucket: hummock001
     region: "eu-lambronx-1"
     forcePathStyle: true
