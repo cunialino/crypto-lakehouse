@@ -14,6 +14,10 @@ spec:
       labels:
         app: binance-collector
     spec:
+      tolerations:
+        - key: "opi"
+          operator: "Exists"
+          effect: "NoSchedule"
       nodeSelector:
         internet: "true"
 
