@@ -18,8 +18,6 @@ spec:
         - key: "opi"
           operator: "Exists"
           effect: "NoSchedule"
-      nodeSelector:
-        internet: "true"
 
       containers:
         - name: binance-collector
