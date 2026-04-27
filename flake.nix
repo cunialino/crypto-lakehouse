@@ -34,17 +34,16 @@
           pname = "crypto-collector";
           version = "0.1.0";
           cargoLock = {
-            lockFile = ./rustapps/crypto-collector/Cargo.lock;
+            lockFile = ./Cargo.lock;
           };
           src = ./rustapps/crypto-collector;
-          cargoPatches = [ ];
-          cargoCheckPaths = [
-            "src"
-            "Cargo.toml"
-          ];
           inherit rustToolchain;
           inherit buildInputs;
           inherit nativeBuildInputs;
+          postPatch = ''
+            cp ${./Cargo.lock} Cargo.lock
+          '';
+
           PROTOC = "${pkgs.protobuf}/bin/protoc";
         };
       in
