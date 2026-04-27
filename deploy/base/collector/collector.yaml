@@ -28,8 +28,8 @@ spec:
               value: nats://nats-cluster.nats.svc.cluster.local:4222
           resources:
             requests:
-              cpu: "250m"
-              memory: "512Mi"
+              cpu: "10m"
+              memory: "16Mi"
             limits:
-              cpu: "1000m"
-              memory: "2Gi"
+              cpu: "100m"
+              memory: "128Gi"
