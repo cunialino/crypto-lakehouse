@@ -63,6 +63,10 @@
           };
           config = {
             Entrypoint = [ "${cryptoCollector}/bin/crypto-collector" ];
+            Env = [
+              "SSL_CERT_FILE=${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt"
+              "SSL_CERT_DIR=${pkgs.cacert}/etc/ssl/certs"
+            ];
           };
         };
 
