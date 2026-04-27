@@ -64,8 +64,14 @@ pub(crate) trait Exchange<T: for<'de> serde::Deserialize<'de> + Into<TradeEventP
         tracing::debug!("Starting {} big loop", self.name());
         async move {
             let (send, mut recv) = tokio::sync::mpsc::channel(1);
-            let _ = tokio::spawn(self.connection_manager(send));
-            let mut read = recv.recv().await.context("Could init reader")?;
+            let fut = self.connection_manager(send);
+            tokio::spawn(async move {
+                match fut.await {
+                    Ok(()) => {}
+                    Err(e) => tracing::error!("Connection manager failed: {e:?}"),
+                }
+            });
+            let mut read = recv.recv().await.context("Could not init reader")?;
             loop {
                 tokio::select! {
                     new_read = recv.recv() => {
