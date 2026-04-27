@@ -14,11 +14,6 @@ spec:
       labels:
         app: binance-collector
     spec:
-      tolerations:
-        - key: "opi"
-          operator: "Exists"
-          effect: "NoSchedule"
-
       containers:
         - name: binance-collector
           image: custom.io/crypto-collector:v0.2.3
