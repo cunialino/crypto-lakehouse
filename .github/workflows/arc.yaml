@@ -16,18 +16,37 @@ jobs:
         STORAGE_DRIVER: vfs
     steps:
       - name: Install dependencies
-        run: apk add --no-cache nix git tar
+        run: apk add --no-cache nix git tar curl
 
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Build image
-        run: git config --global --add safe.directory $(pwd) && nix build --extra-experimental-features 'nix-command flakes' .#docker
+      - name: Install regctl
+        run: |
+          ARCH=$(uname -m)
+          if [ "$ARCH" = "x86_64" ]; then ARCH="amd64"; fi
+          if [ "$ARCH" = "aarch64" ]; then ARCH="arm64"; fi
+          curl -L "https://github.com/regclient/regclient/releases/latest/download/regctl-linux-$ARCH" -o regctl
+          chmod +x regctl
 
-      - name: Push image
+      - name: Build and Push Multi-Arch Images
         env:
           BASE: 192.168.0.2:5000/crypto-collector
           TAG: ${{ github.ref_name }}
         run: |
-          nix run --extra-experimental-features 'nix-command flakes' nixpkgs#skopeo -- copy --insecure-policy --dest-tls-verify=false docker-archive:"$(readlink result)" docker://$BASE:$TAG
-          nix run --extra-experimental-features 'nix-command flakes' nixpkgs#skopeo -- copy --insecure-policy --dest-tls-verify=false docker-archive:"$(readlink result)" docker://$BASE:latest
+          git config --global --add safe.directory $(pwd)
+          
+          # 1. Build and Push AMD64
+          nix build --out-link x86-result .#packages.x86_64-linux.docker
+          nix run nixpkgs#skopeo -- copy --insecure-policy --dest-tls-verify=false docker-archive:$(readlink x86-result) docker://$BASE:$TAG-amd64
+          
+          # 2. Build and Push ARM64
+          nix build --out-link arm-result .#packages.aarch64-linux.docker
+          nix run nixpkgs#skopeo -- copy --insecure-policy --dest-tls-verify=false docker-archive:$(readlink arm-result) docker://$BASE:$TAG-arm64
+          
+          # 3. Create Multi-Arch Manifest
+          ./regctl manifest create $BASE:$TAG $BASE:$TAG-amd64 $BASE:$TAG-arm64 --insecure
+          
+          # 4. Push the 'latest' manifest as well
+          ./regctl manifest create $BASE:latest $BASE:$TAG-amd64 $BASE:$TAG-arm64 --insecure
+          ./regctl manifest push $BASE:latest $BASE --insecure
