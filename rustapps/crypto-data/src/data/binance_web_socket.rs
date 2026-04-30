@@ -42,7 +42,7 @@ pub struct TradeEventBinance {
     pub is_best_price_match: bool,
 }
 
-impl From<crate::data::binance_web_socket::TradeEventBinance> for crate::data::TradeEventProto {
+impl From<TradeEventBinance> for crate::data::TradeEventProto {
     fn from(event: TradeEventBinance) -> Self {
         Self {
             event_time: event.event_time,
@@ -80,7 +80,7 @@ where
 }
 
 pub struct BinanceExhange {}
-impl Exchange<TradeEventBinance> for BinanceExhange {
+impl<P: crate::publisher::Publisher> Exchange<TradeEventBinance, P> for BinanceExhange {
     fn name(&self) -> &str {
         "BINANCE"
     }
@@ -92,7 +92,7 @@ impl Exchange<TradeEventBinance> for BinanceExhange {
             loop {
                 let url = "wss://stream.binance.com:9443/ws/btcusdt@trade";
                 tracing::info!("Setting up connection to ws");
-                let (ws, _) = connect_async(url).await?;
+                let (ws, _): (_, _) = connect_async(url).await?;
                 let (_, read) = ws.split();
                 tracing::info!("Connection to ws set");
                 sender.send(read).await?;

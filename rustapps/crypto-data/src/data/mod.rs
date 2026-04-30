@@ -1,12 +1,12 @@
-pub(crate) mod binance_web_socket;
+pub mod binance_web_socket;
 use anyhow::Context;
 use futures::stream::SplitStream;
+use prost::Message;
 use tokio::net::TcpStream;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, tungstenite::Utf8Bytes};
 
 use futures::StreamExt;
-
-use prost::Message;
+use tokio_tungstenite::tungstenite::Message as TMsg;
 
 pub mod snazzy {
     pub mod items {
@@ -14,18 +14,18 @@ pub mod snazzy {
     }
 }
 
-use snazzy::items::TradeEventProto;
+pub use snazzy::items::TradeEventProto;
 
 type MyStream = SplitStream<WebSocketStream<MaybeTlsStream<TcpStream>>>;
 
-pub(crate) trait Exchange<T: for<'de> serde::Deserialize<'de> + Into<TradeEventProto>>:
+pub trait Exchange<T: for<'de> serde::Deserialize<'de> + Into<TradeEventProto>, P: crate::publisher::Publisher>:
     Send + Sync
 {
     fn name(&self) -> &str;
     fn handle_message(
         &self,
         message_txt: Utf8Bytes,
-        js: &async_nats::jetstream::Context,
+        publisher: &P,
     ) -> impl std::future::Future<Output = ()> + Send {
         async move {
             let my_data: T = serde_json::from_slice(message_txt.as_bytes()).unwrap();
@@ -39,15 +39,10 @@ pub(crate) trait Exchange<T: for<'de> serde::Deserialize<'de> + Into<TradeEventP
                     eprintln!("Failed to encode: {}", e);
                 })
                 .unwrap();
-            match js.publish(subject.to_string(), buf.into()).await {
-                Ok(ack) => match ack.await {
-                    Ok(_) => {}
-                    Err(e) => {
-                        tracing::error!("NATS ack failed: {:?}", e);
-                    }
-                },
+            match publisher.publish_trade(subject, buf).await {
+                Ok(_) => {}
                 Err(e) => {
-                    eprintln!("failed to publish to {}: {:?}", subject, e);
+                    tracing::error!("NATS publish failed: {:?}", e);
                 }
             }
             ()
@@ -59,7 +54,7 @@ pub(crate) trait Exchange<T: for<'de> serde::Deserialize<'de> + Into<TradeEventP
     ) -> impl std::future::Future<Output = anyhow::Result<()>> + Send + 'static;
     fn the_big_loop(
         &self,
-        js: &async_nats::jetstream::Context,
+        publisher: &P,
     ) -> impl std::future::Future<Output = anyhow::Result<()>> + Send {
         tracing::debug!("Starting {} big loop", self.name());
         async move {
@@ -71,7 +66,7 @@ pub(crate) trait Exchange<T: for<'de> serde::Deserialize<'de> + Into<TradeEventP
                     Err(e) => tracing::error!("Connection manager failed: {e:?}"),
                 }
             });
-            let mut read = recv.recv().await.context("Could not init reader")?;
+            let mut read: MyStream = recv.recv().await.context("Could not init reader")?;
             loop {
                 tokio::select! {
                     new_read = recv.recv() => {
@@ -87,8 +82,8 @@ pub(crate) trait Exchange<T: for<'de> serde::Deserialize<'de> + Into<TradeEventP
                         match msg_res {
                             Some(msg) => {
                                 match msg {
-                                    Ok(tokio_tungstenite::tungstenite::Message::Text(txt)) => {
-                                        self.handle_message(txt, js).await;
+                                    Ok(TMsg::Text(txt)) => {
+                                        self.handle_message(txt, publisher).await;
                                     },
                                     Ok(_) => {},
                                     Err(e) => {

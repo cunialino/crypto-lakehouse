@@ -148,15 +148,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "crypto-batcher"
+version = "0.1.0"
+
+[[package]]
 name = "crypto-collector"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-nats",
- "bytes",
+ "crypto-data",
  "futures",
- "prost",
- "prost-build",
  "serde",
  "serde_json",
  "tokio",
@@ -173,6 +175,21 @@ checksum = "78c8292055d1c1df0cce5d180393dc8cce0abec0a7102adb6c7b1eef6016d60a"
 dependencies = [
  "generic-array",
  "typenum",
+]
+
+[[package]]
+name = "crypto-data"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "futures",
+ "prost",
+ "prost-build",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-tungstenite",
+ "tracing",
 ]
 
 [[package]]
@@ -1140,9 +1157,9 @@ dependencies = [
 
 [[package]]
 name = "rustls"
-version = "0.23.39"
+version = "0.23.40"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7c2c118cb077cca2822033836dfb1b975355dfb784b5e8da48f7b6c5db74e60e"
+checksum = "ef86cd5876211988985292b91c96a8f2d298df24e75989a43a3c73f2d4d8168b"
 dependencies = [
  "once_cell",
  "ring",

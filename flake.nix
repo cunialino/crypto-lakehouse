@@ -9,6 +9,7 @@
 
   outputs =
     {
+      self,
       nixpkgs,
       rust-overlay,
       flake-utils,
@@ -36,13 +37,11 @@
           cargoLock = {
             lockFile = ./Cargo.lock;
           };
-          src = ./rustapps/crypto-collector;
+          src = self;
+          cargoBuildFlags = [ "-p crypto-collector" ];
           inherit rustToolchain;
           inherit buildInputs;
           inherit nativeBuildInputs;
-          postPatch = ''
-            cp ${./Cargo.lock} Cargo.lock
-          '';
 
           PROTOC = "${pkgs.protobuf}/bin/protoc";
         };

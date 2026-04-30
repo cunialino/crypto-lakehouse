@@ -1,0 +1,17 @@
+[package]
+name = "crypto-data"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+prost = "0.14.1"
+serde = { version = "*", features = ["derive"] }
+serde_json = "*"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net"] }
+tokio-tungstenite = { version = "0.28", features = ["native-tls"] }
+futures = "0.3"
+anyhow = "1.0.100"
+tracing = "0.1.41"
+
+[build-dependencies]
+prost-build = "0.14.1"
