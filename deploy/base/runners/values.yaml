@@ -32,8 +32,9 @@ template:
 
     containers:
       - name: runner
-        image: custom.io/builder:0.1.0
+        image: ghcr.io/actions/actions-runner:latest
         command: ["/home/runner/run.sh"]
+
         resources:
           requests:
             cpu: "500m"
