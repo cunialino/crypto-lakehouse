@@ -1,15 +1,21 @@
 metaComponent:
   replicas: 3
+  extraEnvVars:
+    - name: JAVA_TOOL_OPTIONS
+      value: "-Xmx1g"
   resources:
     requests:
       cpu: "100m"
       memory: "128Mi"
     limits:
       cpu: "500m"
-      memory: "512Mi"
+      memory: "2Gi"
 
 computeComponent:
   replicas: 2
+  extraEnvVars:
+    - name: JAVA_TOOL_OPTIONS
+      value: "-Xmx1g"
   extraEnvVarsSecret: rustfs-secret
   resources:
     limits:
@@ -31,6 +37,9 @@ computeComponent:
 
 frontendComponent:
   replicas: 1
+  extraEnvVars:
+    - name: JAVA_TOOL_OPTIONS
+      value: "-Xmx1g"
   extraEnvVarsSecret: rustfs-secret
   resources:
     requests:
@@ -38,7 +47,7 @@ frontendComponent:
       memory: "128Mi"
     limits:
       cpu: "500m"
-      memory: "512Mi"
+      memory: "2Gi"
   extraVolumes:
     - name: schema-storage
       configMap:
