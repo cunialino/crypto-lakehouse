@@ -1,7 +1,3 @@
-image:
-  repository: risingwavelabs/risingwave
-  tag: v2.8.3
-
 metaComponent:
   replicas: 3
   resources:
