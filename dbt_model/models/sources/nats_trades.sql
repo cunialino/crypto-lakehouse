@@ -1,6 +1,5 @@
-{{ config(materialized='table_with_connector') }}
-
-CREATE TABLE trade_events (
+{{ config(materialized='source') }}
+CREATE SOURCE IF NOT EXISTS {{ this }} (
   *,
   trade_ts TIMESTAMP AS to_timestamp(trade_time / 1000.0),
   event_ts TIMESTAMP AS to_timestamp(event_time / 1000.0),
@@ -18,7 +17,5 @@ WITH (
 )
 FORMAT PLAIN ENCODE PROTOBUF (
     message='trade.data.TradeEventProto',
-    schema.location = 's3://hummock001/extra_files/trade_schema.pb',
-    region = 'eu-lambronx-1', 
-    s3.endpoint_url = 'http://rustfs-svc.rustfs.svc.cluster.local:9000',
+    schema.location='file:///etc/risingwave/schemas/trade_schema.pb'
 );
