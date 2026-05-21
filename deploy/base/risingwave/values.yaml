@@ -81,3 +81,8 @@ stateStore:
     forcePathStyle: true
     authentication:
       existingSecretName: rustfs-secret
+
+monitoring:
+  prometheus:
+    enabled: true
+

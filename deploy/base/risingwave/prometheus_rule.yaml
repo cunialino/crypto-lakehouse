@@ -1,0 +1,75 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: risingwave-streaming-alerts
+  namespace: risingwave
+  labels:
+    app: risingwave
+spec:
+  groups:
+    - name: risingwave-streaming
+      rules:
+        - alert: RisingWaveStreamingLagWarning
+          expr: |
+            histogram_quantile(0.99,
+              rate(risingwave_meta_barrier_duration_seconds_bucket[5m])
+            ) > 10
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "RisingWave barrier latency p99 exceeds 10s"
+            description: "Streaming pipeline is experiencing high barrier latency (p99 > 10s). This indicates backpressure or resource contention."
+
+        - alert: RisingWaveStreamingStuck
+          expr: |
+            histogram_quantile(0.99,
+              rate(risingwave_meta_barrier_duration_seconds_bucket[5m])
+            ) > 60
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "RisingWave streaming is stuck - barrier latency p99 exceeds 60s"
+            description: "The streaming pipeline is effectively stuck. Barrier latency p99 exceeds 60s. Check compute node resources, compaction status, or source/sink connectivity."
+
+        - alert: RisingWaveStreamingFrozen
+          expr: |
+            rate(risingwave_meta_barrier_duration_seconds_count[5m]) == 0
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "RisingWave streaming appears frozen - no barriers completing"
+            description: "No barrier completions detected in the last 5 minutes. The streaming pipeline may be completely stuck."
+
+        - alert: RisingWaveBackpressure
+          expr: |
+            rate(risingwave_stream_actor_output_buffer_blocking_duration_seconds_sum[5m]) /
+            rate(risingwave_stream_actor_output_buffer_blocking_duration_seconds_count[5m]) > 1
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "RisingWave actors experiencing backpressure"
+            description: "Stream actors are spending >1s blocked on output buffers on average. Downstream operators cannot keep up."
+
+        - alert: RisingWaveCompactionLag
+          expr: |
+            risingwave_compactor_pending_task_count > 100
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "RisingWave compaction tasks backing up"
+            description: "More than 100 pending compaction tasks. Consider scaling compactor replicas."
+
+        - alert: RisingWaveComponentDown
+          expr: |
+            up{job=~"risingwave.*"} == 0
+          for: 2m
+          labels:
+            severity: critical
+          annotations:
+            summary: "RisingWave component is down"
+            description: "A RisingWave component (meta, compute, frontend, or compactor) has been down for more than 2 minutes."
