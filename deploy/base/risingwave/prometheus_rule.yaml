@@ -12,7 +12,7 @@ spec:
         - alert: RisingWaveStreamingLagWarning
           expr: |
             histogram_quantile(0.99,
-              rate(risingwave_meta_barrier_duration_seconds_bucket[5m])
+              rate(meta_barrier_duration_seconds_bucket[5m])
             ) > 10
           for: 5m
           labels:
@@ -24,7 +24,7 @@ spec:
         - alert: RisingWaveStreamingStuck
           expr: |
             histogram_quantile(0.99,
-              rate(risingwave_meta_barrier_duration_seconds_bucket[5m])
+              rate(meta_barrier_duration_seconds_bucket[5m])
             ) > 60
           for: 5m
           labels:
@@ -35,7 +35,7 @@ spec:
 
         - alert: RisingWaveStreamingFrozen
           expr: |
-            rate(risingwave_meta_barrier_duration_seconds_count[5m]) == 0
+            rate(meta_barrier_duration_seconds_count[5m]) == 0
           for: 5m
           labels:
             severity: critical
@@ -45,8 +45,8 @@ spec:
 
         - alert: RisingWaveBackpressure
           expr: |
-            rate(risingwave_stream_actor_output_buffer_blocking_duration_seconds_sum[5m]) /
-            rate(risingwave_stream_actor_output_buffer_blocking_duration_seconds_count[5m]) > 1
+            rate(stream_actor_output_buffer_blocking_duration_seconds_sum[5m]) /
+            rate(stream_actor_output_buffer_blocking_duration_seconds_count[5m]) > 1
           for: 5m
           labels:
             severity: warning
@@ -56,7 +56,7 @@ spec:
 
         - alert: RisingWaveCompactionLag
           expr: |
-            risingwave_compactor_pending_task_count > 100
+            compactor_pending_task_count > 100
           for: 10m
           labels:
             severity: warning
