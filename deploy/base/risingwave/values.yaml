@@ -82,7 +82,9 @@ stateStore:
     authentication:
       existingSecretName: rustfs-secret
 
-monitoring:
-  prometheus:
+monitor:
+  podMonitor:
     enabled: true
+    additionalLabels:
+      release: prometheus
 
