@@ -3,6 +3,8 @@ metaComponent:
   extraEnvVars:
     - name: JAVA_TOOL_OPTIONS
       value: "-Xmx1g"
+    - name: RW_CONFIG_PATH
+      value: /etc/risingwave/config/risingwave.toml
   resources:
     requests:
       cpu: "100m"
@@ -10,12 +12,22 @@ metaComponent:
     limits:
       cpu: "500m"
       memory: "2Gi"
+  extraVolumes:
+    - name: rw-config
+      configMap:
+        name: rw-config
+  extraVolumeMounts:
+    - name: rw-config
+      mountPath: /etc/risingwave/config
+      readOnly: true
 
 computeComponent:
   replicas: 2
   extraEnvVars:
     - name: JAVA_TOOL_OPTIONS
       value: "-Xmx1g"
+    - name: RW_CONFIG_PATH
+      value: /etc/risingwave/config/risingwave.toml
   extraEnvVarsSecret: rustfs-secret
   resources:
     limits:
@@ -30,9 +42,15 @@ computeComponent:
     - name: schema-storage
       configMap:
         name: rw-proto-schema
+    - name: rw-config
+      configMap:
+        name: rw-config
   extraVolumeMounts:
     - name: schema-storage
       mountPath: /etc/risingwave/schemas
+      readOnly: true
+    - name: rw-config
+      mountPath: /etc/risingwave/config
       readOnly: true
 
 frontendComponent:
@@ -40,6 +58,8 @@ frontendComponent:
   extraEnvVars:
     - name: JAVA_TOOL_OPTIONS
       value: "-Xmx1g"
+    - name: RW_CONFIG_PATH
+      value: /etc/risingwave/config/risingwave.toml
   extraEnvVarsSecret: rustfs-secret
   resources:
     requests:
@@ -52,16 +72,33 @@ frontendComponent:
     - name: schema-storage
       configMap:
         name: rw-proto-schema
+    - name: rw-config
+      configMap:
+        name: rw-config
   extraVolumeMounts:
     - name: schema-storage
       mountPath: /etc/risingwave/schemas
       readOnly: true
+    - name: rw-config
+      mountPath: /etc/risingwave/config
+      readOnly: true
 
 compactorComponent:
   replicas: 1
+  extraEnvVars:
+    - name: RW_CONFIG_PATH
+      value: /etc/risingwave/config/risingwave.toml
   resources:
     limits: { cpu: "1", memory: "1Gi" }
     requests: { cpu: "100m", memory: "256M" }
+  extraVolumes:
+    - name: rw-config
+      configMap:
+        name: rw-config
+  extraVolumeMounts:
+    - name: rw-config
+      mountPath: /etc/risingwave/config
+      readOnly: true
 
 metaStore:
   postgresql:

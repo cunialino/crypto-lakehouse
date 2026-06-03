@@ -1,0 +1,23 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: rw-config
+data:
+  risingwave.toml: |
+    [system]
+    barrier_interval_ms = 2000
+    checkpoint_frequency = 5
+    sstable_size_mb = 64
+
+    [storage.object_store.retry]
+    req_backoff_interval_ms = 1000
+    req_backoff_max_delay_ms = 30000
+    req_backoff_factor = 2
+    streaming_upload_attempt_timeout_ms = 60000
+    streaming_upload_retry_attempts = 5
+    upload_attempt_timeout_ms = 60000
+    upload_retry_attempts = 5
+    streaming_read_attempt_timeout_ms = 30000
+    streaming_read_retry_attempts = 5
+    read_attempt_timeout_ms = 30000
+    read_retry_attempts = 5
