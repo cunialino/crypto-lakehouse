@@ -63,13 +63,3 @@ spec:
           annotations:
             summary: "RisingWave compaction tasks backing up"
             description: "More than 100 pending compaction tasks. Consider scaling compactor replicas."
-
-        - alert: RisingWaveComponentDown
-          expr: |
-            up{job=~"risingwave.*"} == 0
-          for: 2m
-          labels:
-            severity: critical
-          annotations:
-            summary: "RisingWave component is down"
-            description: "A RisingWave component (meta, compute, frontend, or compactor) has been down for more than 2 minutes."
