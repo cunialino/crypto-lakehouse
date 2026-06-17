@@ -14,6 +14,8 @@ WITH (
   consumer.durable_name = 'risingwave_consumer',
   scan.startup.mode = 'earliest',
   consumer.ack_policy   = 'explicit',
+  consumer.max_ack_pending = 10000,
+
 )
 FORMAT PLAIN ENCODE PROTOBUF (
     message='trade.data.TradeEventProto',
