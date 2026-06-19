@@ -6,7 +6,7 @@ data:
   risingwave.toml: |
     [system]
     barrier_interval_ms = 2000
-    checkpoint_frequency = 5
+    checkpoint_frequency = 1
     sstable_size_mb = 64
 
     [storage.object_store.retry]
