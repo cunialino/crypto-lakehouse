@@ -84,13 +84,26 @@ impl<P: crate::publisher::Publisher> Exchange<TradeEventBinance, P> for BinanceE
     fn name(&self) -> &str {
         "BINANCE"
     }
-    fn connection_manager(
+    fn connection_manager<I, S>(
         &self,
         sender: tokio::sync::mpsc::Sender<super::MyStream>,
-    ) -> impl std::future::Future<Output = anyhow::Result<()>> + Send + 'static {
+        symbols: I,
+    ) -> impl std::future::Future<Output = anyhow::Result<()>> + Send + 'static
+    where
+        I: IntoIterator<Item = S> + std::marker::Send,
+        S: AsRef<str>,
+    {
+        let streams: Vec<String> = symbols
+            .into_iter()
+            .map(|s| format!("{}@trade", s.as_ref().to_lowercase()))
+            .collect();
         async move {
             loop {
-                let url = "wss://stream.binance.com:9443/ws/btcusdt@trade";
+                let url = format!(
+                    "wss://stream.binance.com:9443/stream?streams={}",
+                    streams.join("/")
+                );
+
                 tracing::info!("Setting up connection to ws");
                 let (ws, _): (_, _) = connect_async(url).await?;
                 let (_, read) = ws.split();

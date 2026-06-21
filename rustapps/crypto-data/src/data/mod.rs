@@ -18,8 +18,10 @@ pub use snazzy::items::TradeEventProto;
 
 type MyStream = SplitStream<WebSocketStream<MaybeTlsStream<TcpStream>>>;
 
-pub trait Exchange<T: for<'de> serde::Deserialize<'de> + Into<TradeEventProto>, P: crate::publisher::Publisher>:
-    Send + Sync
+pub trait Exchange<
+    T: for<'de> serde::Deserialize<'de> + Into<TradeEventProto>,
+    P: crate::publisher::Publisher,
+>: Send + Sync
 {
     fn name(&self) -> &str;
     fn handle_message(
@@ -48,18 +50,27 @@ pub trait Exchange<T: for<'de> serde::Deserialize<'de> + Into<TradeEventProto>, 
             ()
         }
     }
-    fn connection_manager(
+    fn connection_manager<I, S>(
         &self,
         sender: tokio::sync::mpsc::Sender<MyStream>,
-    ) -> impl std::future::Future<Output = anyhow::Result<()>> + Send + 'static;
-    fn the_big_loop(
+        symbols: I,
+    ) -> impl std::future::Future<Output = anyhow::Result<()>> + Send + 'static
+    where
+        I: IntoIterator<Item = S> + std::marker::Send,
+        S: AsRef<str>;
+    fn the_big_loop<I, S>(
         &self,
         publisher: &P,
-    ) -> impl std::future::Future<Output = anyhow::Result<()>> + Send {
+        symbols: I,
+    ) -> impl std::future::Future<Output = anyhow::Result<()>> + Send
+    where
+        I: IntoIterator<Item = S> + std::marker::Send,
+        S: AsRef<str>,
+    {
         tracing::debug!("Starting {} big loop", self.name());
         async move {
             let (send, mut recv) = tokio::sync::mpsc::channel(1);
-            let fut = self.connection_manager(send);
+            let fut = self.connection_manager(send, symbols);
             tokio::spawn(async move {
                 match fut.await {
                     Ok(()) => {}

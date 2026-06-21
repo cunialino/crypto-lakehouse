@@ -34,7 +34,7 @@ async fn main() -> anyhow::Result<()> {
     let publisher = AsyncNatsPublisher { js };
 
     let binance = BinanceExhange {};
-    tasks_set.spawn(async move { binance.the_big_loop(&publisher).await });
+    tasks_set.spawn(async move { binance.the_big_loop(&publisher, vec!["btcusdt", "ethusdt"]).await });
 
     tasks_set.join_all().await;
 
