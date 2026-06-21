@@ -164,10 +164,7 @@ dependencies = [
  "async-nats",
  "crypto-data",
  "futures",
- "serde",
- "serde_json",
  "tokio",
- "tokio-tungstenite",
  "tracing",
  "tracing-subscriber",
 ]
