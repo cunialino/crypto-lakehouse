@@ -5,6 +5,7 @@ metadata:
   namespace: risingwave
   labels:
     app: risingwave
+    release: prometheus
 spec:
   groups:
     - name: risingwave-streaming
