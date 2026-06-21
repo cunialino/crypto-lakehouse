@@ -58,6 +58,19 @@ impl From<TradeEventBinance> for crate::data::TradeEventProto {
     }
 }
 
+#[derive(Debug, Deserialize)]
+pub struct BinanceStreamPayload {
+    #[allow(dead_code)]
+    pub stream: String,
+    pub data: TradeEventBinance,
+}
+
+impl From<BinanceStreamPayload> for crate::data::TradeEventProto {
+    fn from(payload: BinanceStreamPayload) -> Self {
+        payload.data.into()
+    }
+}
+
 fn string_to_f64<'de, D>(deserilizer: D) -> Result<f64, D::Error>
 where
     D: Deserializer<'de>,
@@ -80,7 +93,7 @@ where
 }
 
 pub struct BinanceExhange {}
-impl<P: crate::publisher::Publisher> Exchange<TradeEventBinance, P> for BinanceExhange {
+impl<P: crate::publisher::Publisher> Exchange<BinanceStreamPayload, P> for BinanceExhange {
     fn name(&self) -> &str {
         "BINANCE"
     }
