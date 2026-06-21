@@ -150,6 +150,11 @@ dependencies = [
 [[package]]
 name = "crypto-batcher"
 version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "crypto-data",
+ "serde",
+]
 
 [[package]]
 name = "crypto-collector"
