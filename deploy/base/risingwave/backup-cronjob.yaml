@@ -26,6 +26,15 @@ spec:
             env:
             - name: RW_META_ADDR
               value: "http://risingwave-meta-headless.risingwave.svc.cluster.local:5690"
+            - name: AWS_REGION
+              value: "eu-lambronx-1"
+            - name: RW_S3_ENDPOINT
+              value: "http://garage-svc.garage.svc.cluster.local:3900"
+            - name: RW_IS_FORCE_PATH_STYLE
+              value: "true"
+            envFrom:
+            - secretRef:
+                name: rustfs-secret
             resources:
               requests:
                 cpu: "100m"
