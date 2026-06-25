@@ -7,11 +7,11 @@ metaComponent:
       value: /etc/risingwave/config/risingwave.toml
   resources:
     requests:
-      cpu: "100m"
-      memory: "128Mi"
+      cpu: "20m"
+      memory: "256Mi"
     limits:
-      cpu: "500m"
-      memory: "2Gi"
+      cpu: "200m"
+      memory: "512Mi"
   extraVolumes:
     - name: rw-config
       configMap:
@@ -31,12 +31,12 @@ computeComponent:
   extraEnvVarsSecret: rustfs-secret
   resources:
     limits:
-      cpu: "2"
-      memory: "4Gi"
+      cpu: "500m"
+      memory: "2Gi"
 
     requests:
-      cpu: "1"
-      memory: "2Gi"
+      cpu: "200m"
+      memory: "1Gi"
 
   extraVolumes:
     - name: schema-storage
@@ -89,8 +89,8 @@ compactorComponent:
     - name: RW_CONFIG_PATH
       value: /etc/risingwave/config/risingwave.toml
   resources:
-    limits: { cpu: "1", memory: "1Gi" }
-    requests: { cpu: "100m", memory: "256M" }
+    limits: { cpu: "500m", memory: "1Gi" }
+    requests: { cpu: "50m", memory: "256M" }
   extraVolumes:
     - name: rw-config
       configMap:
