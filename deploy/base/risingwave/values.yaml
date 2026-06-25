@@ -8,10 +8,10 @@ metaComponent:
   resources:
     requests:
       cpu: "20m"
-      memory: "256Mi"
+      memory: "1Gi"
     limits:
       cpu: "200m"
-      memory: "512Mi"
+      memory: "2Gi"
   extraVolumes:
     - name: rw-config
       configMap:
