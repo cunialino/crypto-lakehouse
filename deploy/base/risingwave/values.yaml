@@ -1,3 +1,5 @@
+image:
+  registry: ghcr.io
 metaComponent:
   replicas: 3
   extraEnvVars:
