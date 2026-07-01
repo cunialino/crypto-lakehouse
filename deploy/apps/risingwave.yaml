@@ -12,7 +12,7 @@ spec:
       ref: myrepo
     - repoURL: "https://risingwavelabs.github.io/helm-charts/"
       chart: risingwave
-      targetRevision: 0.2.54
+      targetRevision: 0.2.55
       helm:
         valueFiles: 
           - $myrepo/deploy/base/risingwave/values.yaml
