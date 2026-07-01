@@ -75,8 +75,8 @@ fn string_to_f64<'de, D>(deserilizer: D) -> Result<f64, D::Error>
 where
     D: Deserializer<'de>,
 {
-    struct StrinOrFloat;
-    impl<'de> de::Visitor<'de> for StrinOrFloat {
+    struct StringOrFloat;
+    impl<'de> de::Visitor<'de> for StringOrFloat {
         type Value = f64;
         fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
             formatter.write_str("a string containing a number")
@@ -89,11 +89,11 @@ where
         }
     }
 
-    deserilizer.deserialize_any(StrinOrFloat)
+    deserilizer.deserialize_any(StringOrFloat)
 }
 
-pub struct BinanceExhange {}
-impl<P: crate::publisher::Publisher> Exchange<BinanceStreamPayload, P> for BinanceExhange {
+pub struct BinanceExchange {}
+impl<P: crate::publisher::Publisher> Exchange<BinanceStreamPayload, P> for BinanceExchange {
     fn name(&self) -> &str {
         "BINANCE"
     }

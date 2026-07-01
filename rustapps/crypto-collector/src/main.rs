@@ -1,5 +1,5 @@
 use anyhow::Context;
-use crypto_data::data::{binance_web_socket::BinanceExhange, Exchange};
+use crypto_data::data::{binance_web_socket::BinanceExchange, Exchange};
 use crypto_data::publisher::{LoggingPublisher, Publisher};
 use tracing::info;
 
@@ -59,7 +59,7 @@ async fn main() -> anyhow::Result<()> {
 
     let mut tasks_set = tokio::task::JoinSet::new();
 
-    let binance = BinanceExhange {};
+    let binance = BinanceExchange {};
     tasks_set.spawn(async move { binance.the_big_loop(&publisher, vec!["btcusdt", "ethusdt"]).await });
 
     tasks_set.join_all().await;
