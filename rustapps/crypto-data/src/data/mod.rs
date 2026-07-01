@@ -47,7 +47,6 @@ pub trait Exchange<
                     tracing::error!("NATS publish failed: {:?}", e);
                 }
             }
-            ()
         }
     }
     fn connection_manager<I, S>(
@@ -96,7 +95,7 @@ pub trait Exchange<
                                     Ok(TMsg::Text(txt)) => {
                                         self.handle_message(txt, publisher).await;
                                     },
-                                    Ok(_) => {},
+                                    Ok(b) => {tracing::warn!("Unknown behaviour: {}", b)},
                                     Err(e) => {
                                         eprintln!("websocket error: {}", e);
                                         break;
