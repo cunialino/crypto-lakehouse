@@ -1,12 +1,16 @@
-{{ config(materialized='sink') }}
+{{ config(
+  materialized='sink',
+  pre_hook="SET streaming_parallelism_for_sink
+     = '1'" 
+) }}
 
 CREATE SINK IF NOT EXISTS iceberg_trades_sink
 FROM {{ ref('nats_trades_mv') }}
 WITH (
     connector = 'iceberg',
-    type = 'upsert',
+    type = 'append-only',
+    force_append_only = 'true',
     primary_key = 'exchange,symbol,trade_id',
-    enable_compaction = 'true',
     database.name = 'trades',
     create_table_if_not_exists = 'true',
     table.name = 'trades',

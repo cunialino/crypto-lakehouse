@@ -3,7 +3,7 @@ CREATE SOURCE IF NOT EXISTS {{ this }} (
   *,
   trade_ts TIMESTAMP AS to_timestamp(trade_time / 1000.0),
   event_ts TIMESTAMP AS to_timestamp(event_time / 1000.0),
-  WATERMARK FOR trade_ts AS trade_ts - INTERVAL '5 seconds'
+  WATERMARK FOR trade_ts AS trade_ts - INTERVAL '60 seconds'
 )
 WITH (
   connector = 'nats',
