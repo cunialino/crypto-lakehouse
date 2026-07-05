@@ -1,4 +1,4 @@
-FROM ghcr.io/dbt-labs/dbt-core:1.11.11
+FROM ghcr.io/dbt-labs/dbt-core:1.11.12
 
 RUN pip install dbt-risingwave
 
