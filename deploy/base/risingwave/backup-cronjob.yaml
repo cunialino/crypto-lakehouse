@@ -17,7 +17,7 @@ spec:
           restartPolicy: Never
           containers:
           - name: backup
-            image: ghcr.io/risingwavelabs/risingwave:v3.0.1
+            image: ghcr.io/risingwavelabs/risingwave:v3.0.2
             command:
             - ./risingwave/bin/risingwave
             - ctl
