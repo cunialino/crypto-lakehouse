@@ -1,0 +1,29 @@
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: risingwave-compute
+  namespace: risingwave
+spec:
+  scaleTargetRef:
+    name: risingwave-compute
+    kind: StatefulSet
+  minReplicaCount: 0
+  maxReplicaCount: 10
+  pollingInterval: 15
+  cooldownPeriod: 120
+  advanced:
+    horizontalPodAutoscalerConfig:
+      behavior:
+        scaleDown:
+          stabilizationWindowSeconds: 300
+        scaleUp:
+          stabilizationWindowSeconds: 60
+  triggers:
+    - type: nats-jetstream
+      metadata:
+        natsServerMonitoringEndpoint: nats-cluster-headless.nats.svc.cluster.local:8222
+        account: "$G"
+        stream: "tradesstream"
+        consumer: "risingwave_consumer"
+        lagThreshold: "2000"
+        activationLagThreshold: "0"
