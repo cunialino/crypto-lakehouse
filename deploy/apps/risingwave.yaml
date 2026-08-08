@@ -19,8 +19,15 @@ spec:
   destination:
     server: https://kubernetes.default.svc
     namespace: risingwave
+  ignoreDifferences:
+    - group: apps
+      kind: StatefulSet
+      name: risingwave-compute
+      jsonPointers:
+        - /spec/replicas
   syncPolicy:
     automated:
       enabled: false
     syncOptions:
       - CreateNamespace=true
+      - RespectIgnoreDifferences=true
