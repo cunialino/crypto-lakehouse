@@ -25,6 +25,18 @@ spec:
       name: risingwave-compute
       jsonPointers:
         - /spec/replicas
+        - /spec/updateStrategy/rollingUpdate/maxUnavailable
+    - group: apps
+      kind: StatefulSet
+      name: risingwave-meta
+      jsonPointers:
+        - /spec/updateStrategy/rollingUpdate/maxUnavailable
+    - group: ""
+      kind: Secret
+      name: risingwave-secret-store
+      namespace: risingwave
+      jsonPointers:
+        - /data
   syncPolicy:
     automated:
       enabled: false
