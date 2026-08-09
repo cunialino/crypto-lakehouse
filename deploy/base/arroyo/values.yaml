@@ -1,0 +1,66 @@
+image:
+  repository: ghcr.io/arroyosystems/arroyo
+  tag: "0.15"
+
+controller:
+  resources:
+    requests:
+      cpu: "200m"
+      memory: "256Mi"
+    limits:
+      cpu: "1"
+      memory: "2Gi"
+
+worker:
+  slots: 4
+  resources:
+    requests:
+      cpu: "100m"
+      memory: "128Mi"
+    limits:
+      cpu: "500m"
+      memory: "512Mi"
+
+postgresql:
+  deploy: false
+  externalDatabase:
+    host: pg-cluster-rw.cnpg-system.svc.cluster.local
+    port: 5432
+    name: arroyo
+    user: arroyo
+    password: placeholder
+
+prometheus:
+  setAnnotations: true
+
+s3:
+  region: eu-lambronx-1
+
+artifactUrl: "s3::http://garage-svc.garage.svc.cluster.local:3900/arroyo001/artifacts"
+checkpointUrl: "s3::http://garage-svc.garage.svc.cluster.local:3900/arroyo001/checkpoints"
+
+env:
+  - name: AWS_ACCESS_KEY_ID
+    valueFrom:
+      secretKeyRef:
+        name: rustfs-secret
+        key: AWS_ACCESS_KEY_ID
+  - name: AWS_SECRET_ACCESS_KEY
+    valueFrom:
+      secretKeyRef:
+        name: rustfs-secret
+        key: AWS_SECRET_ACCESS_KEY
+  - name: AWS_DEFAULT_REGION
+    value: "eu-lambronx-1"
+  - name: ARROYO__DATABASE__POSTGRES__PASSWORD
+    valueFrom:
+      secretKeyRef:
+        name: arroyo-metastore-secret
+        key: password
+  - name: ARROYO__API__AUTH_MODE__TYPE
+    value: "static-api-key"
+  - name: ARROYO__API__AUTH_MODE__API_KEY
+    valueFrom:
+      secretKeyRef:
+        name: arroyo-api-key
+        key: api-key

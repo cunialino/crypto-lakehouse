@@ -1,0 +1,26 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: arroyo
+  namespace: argocd
+spec:
+  project: default
+  sources:
+    - repoURL: "https://github.com/cunialino/crypto-lakehouse.git"
+      targetRevision: main
+      path: deploy/base/arroyo
+      ref: myrepo
+    - repoURL: "https://arroyosystems.github.io/helm-repo"
+      chart: arroyo
+      targetRevision: 0.15.0
+      helm:
+        valueFiles:
+          - $myrepo/deploy/base/arroyo/values.yaml
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: arroyo
+  syncPolicy:
+    automated:
+      enabled: false
+    syncOptions:
+      - CreateNamespace=true
