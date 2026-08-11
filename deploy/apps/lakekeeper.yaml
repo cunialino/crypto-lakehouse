@@ -24,6 +24,24 @@ spec:
             user: "lakekeeper"
             passwordSecret: "lakekeeper-secret"
             passwordSecretKey: "PGPASSWORD"
+          catalog:
+            extraEnv:
+              - name: AWS_ACCESS_KEY_ID
+                valueFrom:
+                  secretKeyRef:
+                    name: lakekeeper-secret
+                    key: AWS_ACCESS_KEY_ID
+              - name: AWS_SECRET_ACCESS_KEY
+                valueFrom:
+                  secretKeyRef:
+                    name: lakekeeper-secret
+                    key: AWS_SECRET_ACCESS_KEY
+              - name: LAKEKEEPER__ENABLE_AWS_SYSTEM_CREDENTIALS
+                value: "true"
+              - name: LAKEKEEPER__S3_ENABLE_DIRECT_SYSTEM_CREDENTIALS
+                value: "true"
+              - name: LAKEKEEPER__S3_REQUIRE_EXTERNAL_ID_FOR_SYSTEM_CREDENTIALS
+                value: "false"
   destination:
     server: https://kubernetes.default.svc
     namespace: lakekeeper
