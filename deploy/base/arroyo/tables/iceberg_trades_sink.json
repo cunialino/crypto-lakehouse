@@ -1,0 +1,97 @@
+{
+  "name": "iceberg_trades_sink",
+  "connector": "iceberg",
+  "connection_profile_id": "{{PROFILE_ICEBERG}}",
+  "config": {
+    "type": "sink",
+    "namespace": "trades",
+    "table_name": "trades",
+    "partitioning": {
+      "fields": [
+        {
+          "field": "exchange",
+          "transform": "identity"
+        },
+        {
+          "field": "trade_ts",
+          "transform": "day"
+        }
+      ],
+      "shuffle_by_partition": {
+        "enabled": false
+      }
+    },
+    "rolling_policy": {
+      "interval_seconds": 900
+    }
+  },
+  "schema": {
+    "format": {
+      "type": "parquet",
+      "compression": "zstd"
+    },
+    "bad_data": {
+      "behavior": "drop"
+    },
+    "fields": [
+      {
+        "name": "event_time",
+        "type": "int64",
+        "required": true
+      },
+      {
+        "name": "symbol",
+        "type": "string",
+        "required": true
+      },
+      {
+        "name": "exchange",
+        "type": "string",
+        "required": true
+      },
+      {
+        "name": "trade_id",
+        "type": "int64",
+        "required": true
+      },
+      {
+        "name": "price",
+        "type": "float64",
+        "required": true
+      },
+      {
+        "name": "quantity",
+        "type": "float64",
+        "required": true
+      },
+      {
+        "name": "trade_time",
+        "type": "int64",
+        "required": true
+      },
+      {
+        "name": "is_buyer_maker",
+        "type": "bool",
+        "required": true
+      },
+      {
+        "name": "is_best_price_match",
+        "type": "bool",
+        "required": true
+      },
+      {
+        "name": "trade_ts",
+        "type": "timestamp",
+        "unit": "microsecond",
+        "required": true
+      },
+      {
+        "name": "event_ts",
+        "type": "timestamp",
+        "unit": "microsecond",
+        "required": true
+      }
+    ],
+    "primary_keys": []
+  }
+}

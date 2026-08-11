@@ -1,0 +1,25 @@
+{
+  "name": "trade_gaps_sink",
+  "connector": "nats",
+  "connection_profile_id": "{{PROFILE_NATS}}",
+  "config": {
+    "connectorType": {
+      "sinkType": {
+        "subject": "trade.gaps"
+      }
+    }
+  },
+  "schema": {
+    "format": { "type": "json" },
+    "fields": [
+      { "name": "exchange", "type": "string", "required": true },
+      { "name": "symbol", "type": "string", "required": true },
+      { "name": "window_start", "type": "timestamp", "unit": "microsecond", "required": true },
+      { "name": "min_trade_id", "type": "int64", "required": true },
+      { "name": "max_trade_id", "type": "int64", "required": true },
+      { "name": "events", "type": "int64", "required": true },
+      { "name": "skipped", "type": "int64", "required": true }
+    ],
+    "primary_keys": []
+  }
+}

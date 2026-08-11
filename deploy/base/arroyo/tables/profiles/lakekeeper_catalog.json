@@ -1,0 +1,11 @@
+{
+  "name": "lakekeeper_catalog",
+  "connector": "iceberg",
+  "config": {
+    "catalog": {
+      "type": "rest",
+      "url": "{{LAKEKEEPER_URL}}",
+      "warehouse": "crypto_lakehouse"
+    }
+  }
+}

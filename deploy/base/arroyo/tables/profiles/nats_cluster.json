@@ -1,0 +1,8 @@
+{
+  "name": "nats_cluster",
+  "connector": "nats",
+  "config": {
+    "servers": "{{NATS_URL}}",
+    "authentication": {}
+  }
+}

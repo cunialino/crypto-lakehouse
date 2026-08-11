@@ -1,0 +1,42 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - api_secret.yaml
+  - pg_secret.yaml
+  - rustfs_secret.yaml
+  - pipelines-register-job.yaml
+
+# Generated ConfigMap feeding the register Sync-hook Job at /pipelines.
+# Artifacts are the single source of truth in git:
+#   proto/trade_event.proto   (canonical proto, also compiled by rustapps/crypto-data)
+#   sql/*.sql                 (one file per SQL pipeline)
+#   tables/*.json             (one connection table per file; source/sink)
+#   tables/profiles/*.json    (one connection profile per file)
+#   register.sh               (the Job entrypoint)
+#
+# Kustomize mounts ConfigMap files keyed by BASENAME, so nested tables/ files
+# land at the mount root (e.g. tables/profiles/lakekeeper_catalog.json becomes
+# /pipelines/lakekeeper_catalog.json). register.sh globs /pipelines/*.json and
+# dispatches profiles vs tables by whether the doc has a connection_profile_id.
+#
+# The name hash is disabled so the Job's generated `configMap` volume reference
+# (name: arroyo-pipelines) resolves to this ConfigMap. Kustomize does not rewrite
+# volumes[].configMap.name, so a stable name is required. The Job is an ArgoCD
+# Sync hook that runs on every arroyo-app sync; it idempotently reconciles
+# profiles/tables/pipelines from these files (create, or delete+recreate on
+# drift) so a git change deploys with a single push.
+configMapGenerator:
+  - name: arroyo-pipelines
+    files:
+      - proto/trade_event.proto
+      - register.sh
+      - sql/lakehouse.sql
+      - sql/gaps.sql
+      - tables/nats_trades.json
+      - tables/iceberg_trades_sink.json
+      - tables/trade_gaps_sink.json
+      - tables/profiles/nats_cluster.json
+      - tables/profiles/lakekeeper_catalog.json
+    options:
+      disableNameSuffixHash: true

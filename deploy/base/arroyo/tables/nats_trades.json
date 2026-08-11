@@ -1,0 +1,30 @@
+{
+  "name": "nats_trades",
+  "connector": "nats",
+  "connection_profile_id": "{{PROFILE_NATS}}",
+  "config": {
+    "connectorType": {
+      "sourceType": {
+        "stream": "tradesstream",
+        "rateLimit": 0
+      }
+    }
+  },
+  "schema": {
+    "format": {
+      "type": "protobuf",
+      "message_name": "trade.data.TradeEventProto"
+    },
+    "bad_data": {
+      "behavior": "drop"
+    },
+    "fields": [],
+    "definition": {
+      "type": "protobuf_schema",
+      "schema": "{{PROTO}}",
+      "dependencies": {}
+    },
+    "inferred": false,
+    "primary_keys": []
+  }
+}
