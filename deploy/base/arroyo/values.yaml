@@ -58,9 +58,4 @@ env:
         name: arroyo-metastore-secret
         key: password
   - name: ARROYO__API__AUTH_MODE__TYPE
-    value: "static-api-key"
-  - name: ARROYO__API__AUTH_MODE__API_KEY
-    valueFrom:
-      secretKeyRef:
-        name: arroyo-api-key
-        key: api-key
+    value: "none"

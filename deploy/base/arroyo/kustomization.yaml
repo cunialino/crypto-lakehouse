@@ -6,6 +6,7 @@ resources:
   - pg_secret.yaml
   - rustfs_secret.yaml
   - pipelines-register-job.yaml
+  - ingress.yaml
 
 # Generated ConfigMap feeding the register Sync-hook Job at /pipelines.
 # Artifacts are the single source of truth in git:
