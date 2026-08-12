@@ -1,7 +1,7 @@
 image:
   registry: ghcr.io
 metaComponent:
-  replicas: 3
+  replicas: 0
   extraEnvVars:
     - name: JAVA_TOOL_OPTIONS
       value: "-Xmx1g"
@@ -24,7 +24,7 @@ metaComponent:
       readOnly: true
 
 computeComponent:
-  replicas: 2
+  replicas: 0
   extraEnvVars:
     - name: JAVA_TOOL_OPTIONS
       value: "-Xmx1g"
@@ -56,7 +56,7 @@ computeComponent:
       readOnly: true
 
 frontendComponent:
-  replicas: 1
+  replicas: 0
   extraEnvVars:
     - name: JAVA_TOOL_OPTIONS
       value: "-Xmx1g"
@@ -86,7 +86,7 @@ frontendComponent:
       readOnly: true
 
 compactorComponent:
-  replicas: 1
+  replicas: 0
   extraEnvVars:
     - name: RW_CONFIG_PATH
       value: /etc/risingwave/config/risingwave.toml
