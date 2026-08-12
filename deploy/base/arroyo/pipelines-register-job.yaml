@@ -39,7 +39,7 @@ spec:
             - name: NATS_URL
               value: "nats-cluster.nats.svc.cluster.local:4222"
             - name: LAKEKEEPER_URL
-              value: "http://lakekeeper.lakekeeper.svc.cluster.local:8181/catalog/"
+              value: "http://lakekeeper.lakekeeper.svc.cluster.local:8181/catalog"
           volumeMounts:
             - name: pipelines
               mountPath: /pipelines
