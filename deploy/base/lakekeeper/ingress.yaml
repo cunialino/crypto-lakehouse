@@ -1,0 +1,22 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: lakekeeper-ingress
+  namespace: lakekeeper
+  annotations:
+    tailscale.com/proxy-class: tailscale-small
+spec:
+  ingressClassName: tailscale
+  rules:
+    - http:
+        paths:
+          - backend:
+              service:
+                name: lakekeeper
+                port:
+                  number: 8181
+            path: /
+            pathType: Prefix
+  tls:
+    - hosts:
+        - lk
