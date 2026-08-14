@@ -285,7 +285,7 @@ validate_sqls() {
   echo "validating SQL pipelines..."
   for f in "$SQL_DIR"/*.sql; do
     [ -e "$f" ] || continue
-    body=$(jq -n --arg q "$(cat "$f")" '{query:$q, udfs:[]}')
+    body=$(jq -n --arg q "$(sql_query "$f")" '{query:$q, udfs:[]}')
     out=$(curl -sf -X POST -H "$AUTH" -H "$CT" -d "$body" \
       "${API}/api/v1/pipelines/validate_query" 2>/dev/null) || true
     errs=$(printf '%s' "$out" | jq -r '.errors[]?' 2>/dev/null)
@@ -298,34 +298,58 @@ validate_sqls() {
   done
 }
 
+# Read the declarative checkpoint interval (micros) from a sql file's leading
+# "-- checkpoint_interval_micros: N" comment. Defaults to arroyo's upstream
+# default (10s) if the comment is absent or malformed.
+pipeline_ci() {
+  local v
+  v=$(sed -n 's/^-- *checkpoint_interval_micros: *\([0-9][0-9]*\).*/\1/p' "$1" | head -1)
+  printf '%s' "${v:-10000000}"
+}
+
+# The actual SQL sent to arroyo: file contents minus comment-only lines (the
+# declarative header is not part of the query, so it never triggers SQL drift).
+sql_query() {
+  grep -v '^[[:space:]]*--' "$1"
+}
+
 create_pipeline() {
   local name="$1" sqlfile="$2"
-  local q body id
-  q=$(cat "$sqlfile")
-  body=$(jq -n --arg name "$name" --arg q "$q" \
-    '{name:$name, query:$q, udfs:[], parallelism:1, checkpoint_interval_micros:10000000}')
+  local q body id ci
+  q=$(sql_query "$sqlfile")
+  ci=$(pipeline_ci "$sqlfile")
+  body=$(jq -n --arg name "$name" --arg q "$q" --argjson ci "$ci" \
+    '{name:$name, query:$q, udfs:[], parallelism:1, checkpoint_interval_micros:$ci}')
   id=$(curl -sf -X POST -H "$AUTH" -H "$CT" -d "$body" \
     "${API}/api/v1/pipelines" | jq -r '.id')
   echo "created pipeline $name ($id)"
 }
 
-# Recreate-or-create a pipeline from git SQL.
+# Recreate-or-create a pipeline from git SQL. PATCHes checkpoint interval in
+# place (arroyo's PATCH endpoint changes it live, no restart/replay).
 upsert_pipeline() {
   local name="$1" sqlfile="$2"
-  local id stored q
+  local id stored q ci stored_ci
   id=$(printf '%s' "$PIPELINES" | jq -r --arg n "$name" '.data[]? | select(.name==$n) | .id' | head -1)
-  q=$(cat "$sqlfile")
+  q=$(sql_query "$sqlfile")
+  ci=$(pipeline_ci "$sqlfile")
   if [ -z "$id" ]; then
     create_pipeline "$name" "$sqlfile"
     return 0
   fi
   stored=$(pipeline_of "$id" | jq -r '.query' 2>/dev/null || true)
+  stored_ci=$(pipeline_of "$id" | jq -r '.checkpoint_interval_micros' 2>/dev/null || true)
   if [ "$stored" != "$q" ]; then
     echo "SQL drift detected for pipeline $name; stopping, deleting, recreating"
     wait_terminal "$id"
     curl -sf -X DELETE -H "$AUTH" "${API}/api/v1/pipelines/$id" >/dev/null || true
     echo "  deleted $name ($id)"
     create_pipeline "$name" "$sqlfile"
+  elif [ "$stored_ci" != "$ci" ]; then
+    curl -sf -X PATCH -H "$AUTH" -H "$CT" \
+      -d "{\"checkpoint_interval_micros\":$ci}" \
+      "${API}/api/v1/pipelines/$id" >/dev/null
+    echo "updated checkpoint_interval_micros for $name ($ci)"
   else
     echo "pipeline $name up to date"
   fi

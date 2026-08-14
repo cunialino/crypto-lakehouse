@@ -1,3 +1,4 @@
+-- checkpoint_interval_micros: 60000000
 INSERT INTO trade_gaps_sink
 SELECT exchange, symbol, window.start AS window_start,
        min_trade_id, max_trade_id, events, skipped

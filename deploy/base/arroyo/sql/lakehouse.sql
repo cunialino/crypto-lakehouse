@@ -1,3 +1,4 @@
+-- checkpoint_interval_micros: 60000000
 INSERT INTO iceberg_trades_sink
 SELECT
   cast(event_time as bigint) AS event_time,
