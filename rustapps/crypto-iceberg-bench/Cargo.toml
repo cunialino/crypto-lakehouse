@@ -1,0 +1,15 @@
+[package]
+name = "crypto-iceberg-bench"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+iceberg = "0.10.1"
+iceberg-catalog-rest = "0.10.1"
+iceberg-datafusion = "0.10.1"
+iceberg-storage-opendal = { version = "0.10.1", features = ["opendal-s3"] }
+datafusion = "53.1.0"
+tracing = "0.1"
+tracing-subscriber = "0.3"
