@@ -122,13 +122,15 @@ mod tests {
     use crate::publisher::Publisher;
     use std::sync::{Arc, Mutex};
 
+    type Recorded = (String, Vec<u8>);
+
     #[derive(Default, Clone)]
     struct CapturingPublisher {
-        published: Arc<Mutex<Vec<(String, Vec<u8>)>>>,
+        published: Arc<Mutex<Vec<Recorded>>>,
     }
 
     impl CapturingPublisher {
-        fn recorded(&self) -> Vec<(String, Vec<u8>)> {
+        fn recorded(&self) -> Vec<Recorded> {
             self.published.lock().unwrap().clone()
         }
     }
@@ -176,7 +178,7 @@ mod tests {
         assert_eq!(proto.trade_id, 12345);
         assert_eq!(proto.price, 0.00000050_f64);
         assert_eq!(proto.quantity, 1000.0);
-        assert_eq!(proto.is_buyer_maker, false);
+        assert!(!proto.is_buyer_maker);
     }
 
     #[tokio::test]

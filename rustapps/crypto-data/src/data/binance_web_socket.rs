@@ -98,6 +98,43 @@ where
     deserilizer.deserialize_any(StringOrFloat)
 }
 
+pub struct BinanceExchange {}
+impl<P: crate::publisher::Publisher> Exchange<BinanceStreamPayload, P> for BinanceExchange {
+    fn name(&self) -> &str {
+        "BINANCE"
+    }
+    fn connection_manager<I, S>(
+        &self,
+        sender: tokio::sync::mpsc::Sender<super::MyStream>,
+        symbols: I,
+    ) -> impl std::future::Future<Output = anyhow::Result<()>> + Send + 'static
+    where
+        I: IntoIterator<Item = S> + std::marker::Send,
+        S: AsRef<str>,
+    {
+        let streams: Vec<String> = symbols
+            .into_iter()
+            .map(|s| format!("{}@trade", s.as_ref().to_lowercase()))
+            .collect();
+        async move {
+            loop {
+                let url = format!(
+                    "wss://stream.binance.com:9443/stream?streams={}",
+                    streams.join("/")
+                );
+
+                tracing::info!("Setting up connection to ws");
+                let (ws, _): (_, _) = connect_async(url).await?;
+                let (_, read) = ws.split();
+                tracing::info!("Connection to ws set");
+                sender.send(read).await?;
+                tracing::info!("Connection manager going to sleep");
+                tokio::time::sleep(CONNECTION_TIMEOUT).await;
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -140,8 +177,8 @@ mod tests {
         assert_eq!(proto.trade_id, 12345);
         assert_eq!(proto.price, 0.00000050_f64);
         assert_eq!(proto.quantity, 1000.0);
-        assert_eq!(proto.is_buyer_maker, false);
-        assert_eq!(proto.is_best_price_match, true);
+        assert!(!proto.is_buyer_maker);
+        assert!(proto.is_best_price_match);
     }
 
     #[test]
@@ -174,42 +211,5 @@ mod tests {
         assert_eq!(streams, vec!["btcusdt@trade", "ethusdt@trade"]);
         let name = <BinanceExchange as Exchange<BinanceStreamPayload, crate::publisher::LoggingPublisher>>::name(&exchange);
         assert_eq!(name, "BINANCE");
-    }
-}
-
-pub struct BinanceExchange {}
-impl<P: crate::publisher::Publisher> Exchange<BinanceStreamPayload, P> for BinanceExchange {
-    fn name(&self) -> &str {
-        "BINANCE"
-    }
-    fn connection_manager<I, S>(
-        &self,
-        sender: tokio::sync::mpsc::Sender<super::MyStream>,
-        symbols: I,
-    ) -> impl std::future::Future<Output = anyhow::Result<()>> + Send + 'static
-    where
-        I: IntoIterator<Item = S> + std::marker::Send,
-        S: AsRef<str>,
-    {
-        let streams: Vec<String> = symbols
-            .into_iter()
-            .map(|s| format!("{}@trade", s.as_ref().to_lowercase()))
-            .collect();
-        async move {
-            loop {
-                let url = format!(
-                    "wss://stream.binance.com:9443/stream?streams={}",
-                    streams.join("/")
-                );
-
-                tracing::info!("Setting up connection to ws");
-                let (ws, _): (_, _) = connect_async(url).await?;
-                let (_, read) = ws.split();
-                tracing::info!("Connection to ws set");
-                sender.send(read).await?;
-                tracing::info!("Connection manager going to sleep");
-                tokio::time::sleep(CONNECTION_TIMEOUT).await;
-            }
-        }
     }
 }

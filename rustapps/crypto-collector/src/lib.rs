@@ -18,7 +18,7 @@ impl Publisher for AsyncNatsPublisher {
 }
 
 pub enum Either {
-    Nats(AsyncNatsPublisher),
+    Nats(Box<AsyncNatsPublisher>),
     Logging(LoggingPublisher),
 }
 
@@ -42,7 +42,7 @@ pub async fn build_publisher() -> anyhow::Result<Either> {
                 .await
                 .with_context(|| format!("failed to connect to NATS at {}", url))?;
             let js = async_nats::jetstream::new(nc);
-            Ok(Either::Nats(AsyncNatsPublisher { js }))
+            Ok(Either::Nats(Box::new(AsyncNatsPublisher { js })))
         }
         _ => {
             info!("NATS_URL not set; using LoggingPublisher (no NATS required)");
