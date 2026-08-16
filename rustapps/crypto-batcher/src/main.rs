@@ -1,5 +1,3 @@
-use crypto_data::data::binance_web_socket::TradeEventBinance;
-use serde::Deserialize;
 use std::fs::File;
 use std::io::{self, BufRead};
 

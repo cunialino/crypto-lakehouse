@@ -9,11 +9,7 @@ pub trait Publisher: Send + Sync {
 pub struct LoggingPublisher;
 
 impl Publisher for LoggingPublisher {
-    async fn publish_trade(
-        &self,
-        subject: String,
-        event_bytes: Vec<u8>,
-    ) -> anyhow::Result<()> {
+    async fn publish_trade(&self, subject: String, event_bytes: Vec<u8>) -> anyhow::Result<()> {
         tracing::info!(subject, len = event_bytes.len(), "publish_trade");
         Ok(())
     }

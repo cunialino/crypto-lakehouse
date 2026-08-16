@@ -209,7 +209,10 @@ mod tests {
             .map(|s| format!("{}@trade", s.to_lowercase()))
             .collect();
         assert_eq!(streams, vec!["btcusdt@trade", "ethusdt@trade"]);
-        let name = <BinanceExchange as Exchange<BinanceStreamPayload, crate::publisher::LoggingPublisher>>::name(&exchange);
+        let name = <BinanceExchange as Exchange<
+            BinanceStreamPayload,
+            crate::publisher::LoggingPublisher,
+        >>::name(&exchange);
         assert_eq!(name, "BINANCE");
     }
 }

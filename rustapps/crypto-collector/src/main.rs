@@ -1,6 +1,6 @@
 use anyhow::Result;
 use crypto_collector::build_publisher;
-use crypto_data::data::{binance_web_socket::BinanceExchange, Exchange};
+use crypto_data::data::{Exchange, binance_web_socket::BinanceExchange};
 use tokio::task::JoinSet;
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 2)]
@@ -15,7 +15,11 @@ async fn main() -> Result<()> {
     let mut tasks_set = JoinSet::new();
 
     let binance = BinanceExchange {};
-    tasks_set.spawn(async move { binance.the_big_loop(&publisher, vec!["btcusdt", "ethusdt"]).await });
+    tasks_set.spawn(async move {
+        binance
+            .the_big_loop(&publisher, vec!["btcusdt", "ethusdt"])
+            .await
+    });
 
     tasks_set.join_all().await;
 

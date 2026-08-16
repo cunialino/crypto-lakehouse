@@ -3,17 +3,19 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::{Context, Result};
-use datafusion::execution::runtime_env::RuntimeEnvBuilder;
 use datafusion::execution::SessionStateBuilder;
+use datafusion::execution::runtime_env::RuntimeEnvBuilder;
 use datafusion::prelude::{SessionConfig, SessionContext};
 use iceberg::Catalog;
 use iceberg::CatalogBuilder;
+use iceberg::io::{
+    S3_ACCESS_KEY_ID, S3_ENDPOINT, S3_PATH_STYLE_ACCESS, S3_REGION, S3_SECRET_ACCESS_KEY,
+};
 use iceberg_catalog_rest::{
     REST_CATALOG_PROP_URI, REST_CATALOG_PROP_WAREHOUSE, RestCatalogBuilder,
 };
 use iceberg_datafusion::IcebergCatalogProvider;
 use iceberg_storage_opendal::OpenDalStorageFactory;
-use iceberg::io::{S3_ACCESS_KEY_ID, S3_ENDPOINT, S3_PATH_STYLE_ACCESS, S3_REGION, S3_SECRET_ACCESS_KEY};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -21,17 +23,14 @@ async fn main() -> Result<()> {
 
     let uri = std::env::var("LAKEKEEPER_URI")
         .unwrap_or_else(|_| "http://127.0.0.1:8181/catalog".to_string());
-    let warehouse = std::env::var("LAKEKEEPER_WAREHOUSE")
-        .unwrap_or_else(|_| "crypto_lakehouse".to_string());
+    let warehouse =
+        std::env::var("LAKEKEEPER_WAREHOUSE").unwrap_or_else(|_| "crypto_lakehouse".to_string());
     let s3_endpoint = std::env::var("GARAGE_ENDPOINT")
         .unwrap_or_else(|_| "http://garage-svc.garage.svc.cluster.local:3900".to_string());
-    let s3_region =
-        std::env::var("GARAGE_REGION").unwrap_or_else(|_| "eu-lambronx-1".to_string());
+    let s3_region = std::env::var("GARAGE_REGION").unwrap_or_else(|_| "eu-lambronx-1".to_string());
     // Secrets come from the environment (sourced from .env), never hardcoded.
-    let access_key =
-        std::env::var("GARAGE_ACCESS_KEY").context("GARAGE_ACCESS_KEY not set")?;
-    let secret_key =
-        std::env::var("GARAGE_SECRET_KEY").context("GARAGE_SECRET_KEY not set")?;
+    let access_key = std::env::var("GARAGE_ACCESS_KEY").context("GARAGE_ACCESS_KEY not set")?;
+    let secret_key = std::env::var("GARAGE_SECRET_KEY").context("GARAGE_SECRET_KEY not set")?;
 
     let mut props = HashMap::new();
     props.insert(REST_CATALOG_PROP_URI.to_string(), uri);
@@ -90,7 +89,7 @@ async fn main() -> Result<()> {
         .build();
     let ctx = SessionContext::from(state);
     ctx.register_catalog("lk", Arc::new(provider));
-    eprintln!("[progress] catalog registered", );
+    eprintln!("[progress] catalog registered",);
     drop(catalog);
     let day_sql = r#"
         SELECT

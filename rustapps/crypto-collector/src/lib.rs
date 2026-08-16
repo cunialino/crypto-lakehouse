@@ -7,11 +7,7 @@ pub struct AsyncNatsPublisher {
 }
 
 impl Publisher for AsyncNatsPublisher {
-    async fn publish_trade(
-        &self,
-        subject: String,
-        event_bytes: Vec<u8>,
-    ) -> anyhow::Result<()> {
+    async fn publish_trade(&self, subject: String, event_bytes: Vec<u8>) -> anyhow::Result<()> {
         self.js.publish(subject, event_bytes.into()).await?;
         Ok(())
     }
@@ -23,11 +19,7 @@ pub enum Either {
 }
 
 impl Publisher for Either {
-    async fn publish_trade(
-        &self,
-        subject: String,
-        event_bytes: Vec<u8>,
-    ) -> anyhow::Result<()> {
+    async fn publish_trade(&self, subject: String, event_bytes: Vec<u8>) -> anyhow::Result<()> {
         match self {
             Either::Nats(p) => p.publish_trade(subject, event_bytes).await,
             Either::Logging(p) => p.publish_trade(subject, event_bytes).await,

@@ -1,0 +1,51 @@
+name: rust-check
+
+on:
+  pull_request:
+    paths:
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rustapps/**'
+      - '.github/workflows/rust-check.yaml'
+  push:
+    branches: [main]
+    paths:
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rustapps/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system deps (protoc, openssl for native-tls + prost build)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler libssl-dev pkg-config
+
+      - name: Install Rust toolchain (beta, matches flake.nix pin)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: beta
+          components: rustfmt, clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Format check
+        run: cargo fmt --all --check
+
+      - name: Clippy (deny warnings)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test --workspace

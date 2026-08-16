@@ -1,4 +1,4 @@
-use crypto_collector::{build_publisher, Either};
+use crypto_collector::{Either, build_publisher};
 use crypto_data::publisher::Publisher;
 
 // Serial/kill switch: these tests mutate the process env, so keep them in one
