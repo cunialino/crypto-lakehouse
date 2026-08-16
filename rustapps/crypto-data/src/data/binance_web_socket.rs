@@ -87,6 +87,12 @@ where
         {
             v.parse::<f64>().map_err(de::Error::custom)
         }
+        fn visit_f64<E>(self, v: f64) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            Ok(v)
+        }
     }
 
     deserilizer.deserialize_any(StringOrFloat)
