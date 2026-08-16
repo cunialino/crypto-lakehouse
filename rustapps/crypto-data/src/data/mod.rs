@@ -114,3 +114,108 @@ pub trait Exchange<
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::data::binance_web_socket::{BinanceExchange, TradeEventBinance};
+    use crate::publisher::Publisher;
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Default, Clone)]
+    struct CapturingPublisher {
+        published: Arc<Mutex<Vec<(String, Vec<u8>)>>>,
+    }
+
+    impl CapturingPublisher {
+        fn recorded(&self) -> Vec<(String, Vec<u8>)> {
+            self.published.lock().unwrap().clone()
+        }
+    }
+
+    impl Publisher for CapturingPublisher {
+        async fn publish_trade(&self, subject: String, event_bytes: Vec<u8>) -> anyhow::Result<()> {
+            self.published.lock().unwrap().push((subject, event_bytes));
+            Ok(())
+        }
+    }
+
+    const SAMPLE_TRADE: &str = r#"{
+        "stream": "bnbbtc@trade",
+        "data": {
+            "e": "trade",
+            "E": 1672515782136,
+            "s": "BNBBTC",
+            "t": 12345,
+            "p": "0.00000050",
+            "q": "1000.00000000",
+            "T": 1672515782137,
+            "m": false,
+            "M": true
+        }
+    }"#;
+
+    #[tokio::test]
+    async fn handle_message_parses_encodes_and_publishes() {
+        let publisher = CapturingPublisher::default();
+        let exchange = BinanceExchange {};
+
+        exchange
+            .handle_message(Utf8Bytes::from(SAMPLE_TRADE), &publisher)
+            .await;
+
+        let recorded = publisher.recorded();
+        assert_eq!(recorded.len(), 1, "exactly one trade should be published");
+
+        let (subject, bytes) = &recorded[0];
+        assert_eq!(subject, "exchange.BINANCE");
+
+        let proto = TradeEventProto::decode(bytes.as_slice()).unwrap();
+        assert_eq!(proto.exchange, "BINANCE");
+        assert_eq!(proto.symbol, "BNBBTC");
+        assert_eq!(proto.trade_id, 12345);
+        assert_eq!(proto.price, 0.00000050_f64);
+        assert_eq!(proto.quantity, 1000.0);
+        assert_eq!(proto.is_buyer_maker, false);
+    }
+
+    #[tokio::test]
+    async fn handle_message_propagates_publisher_errors() {
+        let exchange = BinanceExchange {};
+
+        #[derive(Clone)]
+        struct FailingPublisher;
+
+        impl Publisher for FailingPublisher {
+            async fn publish_trade(&self, _: String, _: Vec<u8>) -> anyhow::Result<()> {
+                Err(anyhow::anyhow!("nats down"))
+            }
+        }
+
+        let publisher = FailingPublisher;
+        exchange
+            .handle_message(Utf8Bytes::from(SAMPLE_TRADE), &publisher)
+            .await;
+    }
+
+    #[test]
+    fn proto_roundtrip_is_binary_compatible() {
+        let raw = r#"{
+            "e": "trade",
+            "E": 1672515782136,
+            "s": "BNBBTC",
+            "t": 12345,
+            "p": "0.00000050",
+            "q": "1000.00000000",
+            "T": 1672515782137,
+            "m": false,
+            "M": true
+        }"#;
+        let trade: TradeEventBinance = serde_json::from_str(raw).unwrap();
+        let proto: TradeEventProto = trade.into();
+        let mut buf = Vec::with_capacity(proto.encoded_len());
+        proto.encode(&mut buf).unwrap();
+        let decoded = TradeEventProto::decode(buf.as_slice()).unwrap();
+        assert_eq!(decoded, proto);
+    }
+}

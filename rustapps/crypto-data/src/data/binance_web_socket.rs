@@ -92,6 +92,85 @@ where
     deserilizer.deserialize_any(StringOrFloat)
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Example payload from the Binance websocket docs
+    // (https://github.com/binance/binance-spot-api-docs/blob/master/web-socket-streams.md)
+    const SAMPLE_TRADE: &str = r#"{
+        "e": "trade",
+        "E": 1672515782136,
+        "s": "BNBBTC",
+        "t": 12345,
+        "p": "0.00000050",
+        "q": "1000.00000000",
+        "T": 1672515782137,
+        "m": false,
+        "M": true
+    }"#;
+
+    #[test]
+    fn parses_binance_trade_json() {
+        let trade: TradeEventBinance = serde_json::from_str(SAMPLE_TRADE).unwrap();
+        assert_eq!(trade.event_type, "trade");
+        assert_eq!(trade.event_time, 1672515782136);
+        assert_eq!(trade.symbol, "BNBBTC");
+        assert_eq!(trade.trade_id, 12345);
+        assert_eq!(trade.price, 0.00000050_f64);
+        assert_eq!(trade.quantity, 1000.0);
+        assert_eq!(trade.trade_time, 1672515782137);
+        assert!(!trade.is_buyer_maker);
+        assert!(trade.is_best_price_match);
+    }
+
+    #[test]
+    fn converts_to_proto_and_tags_exchange() {
+        let trade: TradeEventBinance = serde_json::from_str(SAMPLE_TRADE).unwrap();
+        let proto: crate::data::TradeEventProto = trade.into();
+        assert_eq!(proto.exchange, "BINANCE");
+        assert_eq!(proto.symbol, "BNBBTC");
+        assert_eq!(proto.event_time, 1672515782136);
+        assert_eq!(proto.trade_id, 12345);
+        assert_eq!(proto.price, 0.00000050_f64);
+        assert_eq!(proto.quantity, 1000.0);
+        assert_eq!(proto.is_buyer_maker, false);
+        assert_eq!(proto.is_best_price_match, true);
+    }
+
+    #[test]
+    fn parses_stream_payload_wrapper() {
+        let json = format!(r#"{{"stream":"bnbbtc@trade","data":{}}}"#, SAMPLE_TRADE);
+        let payload: BinanceStreamPayload = serde_json::from_str(&json).unwrap();
+        assert_eq!(payload.stream, "bnbbtc@trade");
+        let proto: crate::data::TradeEventProto = payload.into();
+        assert_eq!(proto.symbol, "BNBBTC");
+        assert_eq!(proto.price, 0.00000050_f64);
+    }
+
+    #[test]
+    fn numeric_fields_accept_plain_float() {
+        let json = SAMPLE_TRADE
+            .replace("\"0.00000050\"", "0.00000050")
+            .replace("\"1000.00000000\"", "1000.0");
+        let trade: TradeEventBinance = serde_json::from_str(&json).unwrap();
+        assert_eq!(trade.price, 0.00000050_f64);
+        assert_eq!(trade.quantity, 1000.0);
+    }
+
+    #[test]
+    fn builds_subject_connection_string() {
+        let exchange = BinanceExchange {};
+        let streams: Vec<String> = vec!["BTcUsdt", "ETHUSDT"]
+            .into_iter()
+            .map(|s| format!("{}@trade", s.to_lowercase()))
+            .collect();
+        assert_eq!(streams, vec!["btcusdt@trade", "ethusdt@trade"]);
+        let name = <BinanceExchange as Exchange<BinanceStreamPayload, crate::publisher::LoggingPublisher>>::name(&exchange);
+        assert_eq!(name, "BINANCE");
+    }
+}
+
 pub struct BinanceExchange {}
 impl<P: crate::publisher::Publisher> Exchange<BinanceStreamPayload, P> for BinanceExchange {
     fn name(&self) -> &str {
