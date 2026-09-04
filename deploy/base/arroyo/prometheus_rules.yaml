@@ -1,0 +1,57 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: arroyo-streaming-alerts
+  namespace: arroyo
+  labels:
+    app: arroyo
+    release: prometheus
+spec:
+  groups:
+    - name: arroyo-streaming
+      rules:
+        - alert: ArroyoStreamingStopped
+          expr: |
+            (
+              increase(arroyo_worker_messages_recv[5m]) == 0
+              and
+              increase(arroyo_worker_messages_recv[1h]) > 0
+            )
+          for: 2m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Arroyo streaming stopped for {{ $labels.operator_name }}"
+            description: "Messages stopped being received 5m ago but were flowing within the last hour. Check source connectivity and pipeline health."
+
+        - alert: ArroyoDataStalled
+          expr: |
+            (
+              increase(arroyo_worker_bytes_recv[5m]) == 0
+              and
+              increase(arroyo_worker_bytes_recv[1h]) > 0
+            )
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Arroyo data flow stalled for {{ $labels.operator_name }}"
+            description: "No bytes received in 5m, but data was flowing within the last hour. Possible source issue."
+
+        - alert: ArroyoDeserializationErrors
+          expr: increase(arroyo_worker_deserialization_errors[5m]) > 0
+          for: 1m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Deserialization errors in {{ $labels.operator_name }}"
+            description: "Arroyo is encountering deserialization errors. Check source data format compatibility."
+
+        - alert: ArroyoQueueFull
+          expr: arroyo_worker_tx_queue_size - arroyo_worker_tx_queue_rem > 7500
+          for: 2m
+          labels:
+            severity: warning
+          annotations:
+            summary: "TX queue near capacity for {{ $labels.operator_name }}"
+            description: "TX queue is {{ $value }} / 8192. Downstream backpressure detected."
