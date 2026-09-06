@@ -159,7 +159,7 @@
         };
         packages.dockerSpark = pkgs.dockerTools.buildImage {
           name = "spark";
-          tag = "s0.1.3";
+          tag = "s0.1.4";
           copyToRoot = dockerRootfs;
           config = {
             Entrypoint = [

@@ -13,7 +13,7 @@ spec:
           restartPolicy: "OnFailure"
           containers:
           - name: spark-maintenance
-            image: custom.io/spark:s0.1.3
+            image: custom.io/spark:s0.1.4
             imagePullPolicy: IfNotPresent
             env:
             - name: AWS_ACCESS_KEY_ID

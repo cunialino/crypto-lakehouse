@@ -9,6 +9,11 @@ GARAGE_ENDPOINT = "http://garage-svc.garage.svc.cluster.local:3900"
 spark = (
     SparkSession.builder.appName("LakekeeperGarageMaintenance")
     .config("spark.memory.fraction", "0.9")
+    # Event Logging
+    .config("spark.eventLog.enabled", "true")
+    .config("spark.eventLog.dir", f"s3://lakehouse/spark-events/")
+    .config("spark.eventLog.s3a.endpoint", GARAGE_ENDPOINT)
+    .config("spark.eventLog.s3a.pathStyleAccess", "true")
     # Extensions & REST Catalog Setup
     .config(
         "spark.sql.extensions",
