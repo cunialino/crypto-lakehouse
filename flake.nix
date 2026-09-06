@@ -124,6 +124,9 @@
           paths = [
             spark
             tableMaintenanceScript
+            pkgs.bash
+            pkgs.coreutils
+            python
           ];
           postBuild = ''
             mkdir -p $out/etc
@@ -156,7 +159,7 @@
         };
         packages.dockerSpark = pkgs.dockerTools.buildImage {
           name = "spark";
-          tag = "s0.1.0";
+          tag = "s0.1.3";
           copyToRoot = dockerRootfs;
           config = {
             Entrypoint = [
@@ -173,6 +176,7 @@
               "PYSPARK_PYTHON=${python}/bin/python3"
               "HOME=/tmp"
               "HADOOP_USER_NAME=root"
+              "PATH=${pkgs.bash}/bin:${pkgs.coreutils}/bin:${spark}/bin:${python}/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
             ];
           };
         };

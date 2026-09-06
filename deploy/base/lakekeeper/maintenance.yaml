@@ -13,8 +13,19 @@ spec:
           restartPolicy: "OnFailure"
           containers:
           - name: spark-maintenance
-            image: custom.io/spark:s0.1.0
+            image: custom.io/spark:s0.1.3
             imagePullPolicy: IfNotPresent
+            env:
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: lakekeeper-secret
+                  key: AWS_ACCESS_KEY_ID
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: lakekeeper-secret
+                  key: AWS_SECRET_ACCESS_KEY
             resources:
               requests:
                 memory: "4Gi"
