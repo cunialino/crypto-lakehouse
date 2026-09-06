@@ -8,6 +8,7 @@ resources:
   - pipelines-register-job.yaml
   - ingress.yaml
   - prometheus_rules.yaml
+  - prometheus_podmonitor.yaml
 
 # Generated ConfigMap feeding the register Sync-hook Job at /pipelines.
 # Artifacts are the single source of truth in git:
