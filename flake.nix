@@ -96,6 +96,14 @@
         };
       in
       let
+        tableMaintenanceScript = pkgs.writeTextFile {
+          name = "table_maintenance.py";
+          destination = "/bin/table_maintenance.py";
+          text = ''
+            #!/usr/bin/env python3
+            ${builtins.readFile ./deploy/scripts/table_maintenance.py}'';
+          executable = true;
+        };
         cryptoCollector = pkgs.rustPlatform.buildRustPackage {
           pname = "crypto-collector";
           version = "0.1.0";
@@ -109,6 +117,19 @@
           inherit nativeBuildInputs;
 
           PROTOC = "${pkgs.protobuf}/bin/protoc";
+        };
+
+        dockerRootfs = pkgs.symlinkJoin {
+          name = "docker-rootfs";
+          paths = [
+            spark
+            tableMaintenanceScript
+          ];
+          postBuild = ''
+            mkdir -p $out/etc
+            echo "root:x:0:0:root:/root:/bin/bash" > $out/etc/passwd
+            echo "root:x:0:" > $out/etc/group
+          '';
         };
       in
       {
@@ -130,6 +151,28 @@
             Env = [
               "SSL_CERT_FILE=${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt"
               "SSL_CERT_DIR=${pkgs.cacert}/etc/ssl/certs"
+            ];
+          };
+        };
+        packages.dockerSpark = pkgs.dockerTools.buildImage {
+          name = "spark";
+          tag = "s0.1.0";
+          copyToRoot = dockerRootfs;
+          config = {
+            Entrypoint = [
+              "${spark}/bin/spark-submit"
+              "--driver-memory"
+              "4g"
+              "/bin/table_maintenance.py"
+            ];
+            User = "root";
+            Env = [
+              "SSL_CERT_FILE=${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt"
+              "SSL_CERT_DIR=${pkgs.cacert}/etc/ssl/certs"
+              "SPARK_HOME=${spark}"
+              "PYSPARK_PYTHON=${python}/bin/python3"
+              "HOME=/tmp"
+              "HADOOP_USER_NAME=root"
             ];
           };
         };

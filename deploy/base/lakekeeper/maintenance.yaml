@@ -1,0 +1,22 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: table-maintenance
+  namespace: lakekeeper
+spec:
+  schedule: "0 2 * * *"
+  jobTemplate:
+    spec:
+      backoffLimit: 5
+      template:
+        spec:
+          restartPolicy: "OnFailure"
+          containers:
+          - name: spark-maintenance
+            image: custom.io/spark:s0.1.0
+            imagePullPolicy: IfNotPresent
+            resources:
+              requests:
+                memory: "4Gi"
+              limits:
+                memory: "4Gi"
