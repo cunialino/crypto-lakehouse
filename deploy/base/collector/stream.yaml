@@ -8,3 +8,14 @@ spec:
   storage: file
   maxAge: 72h
   replicas: 3
+---
+apiVersion: jetstream.nats.io/v1beta2
+kind: Stream
+metadata:
+  name: gapstream
+spec:
+  name: gapstream
+  subjects: ["trade.*"]
+  storage: file
+  maxAge: 72h
+  replicas: 3
