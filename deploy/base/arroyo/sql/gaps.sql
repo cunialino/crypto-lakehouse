@@ -12,3 +12,4 @@ FROM (
   FROM nats_trades
   GROUP BY window, exchange, symbol
 )
+where skipped > 0
