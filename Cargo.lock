@@ -1006,7 +1006,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "crypto-iceberg-bench"
+name = "crypto-iceberg-query"
 version = "0.1.0"
 dependencies = [
  "anyhow",
