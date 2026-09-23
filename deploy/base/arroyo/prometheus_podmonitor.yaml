@@ -7,6 +7,16 @@ metadata:
     app: arroyo
     release: prometheus
 spec:
+  # Arroyo 0.15's admin server serves /metrics with Content-Type:
+  # application/octet-stream instead of text/plain; version=0.0.4.
+  # Prometheus >= 3.0 rejects unrecognized Content-Types outright, so every
+  # worker scrape fails with:
+  #   "received unsupported Content-Type \"application/octet-stream\" and no
+  #    fallback_scrape_protocol specified for target"
+  # The payload itself is standard Prometheus text exposition format, so decode
+  # it as such. Requires Prometheus >= v3.0.0 (we run v3.14.0).
+  # TODO: drop this once Arroyo sends a correct Content-Type upstream.
+  fallbackScrapeProtocol: PrometheusText0.0.4
   namespaceSelector:
     matchNames:
       - arroyo
