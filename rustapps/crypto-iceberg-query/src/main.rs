@@ -1,3 +1,4 @@
+use clap::Parser;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
@@ -17,8 +18,16 @@ use iceberg_catalog_rest::{
 use iceberg_datafusion::IcebergCatalogProvider;
 use iceberg_storage_opendal::OpenDalStorageFactory;
 
+#[derive(Parser, Debug)]
+#[command(version, about, long_about = None)]
+struct Args {
+    start_date: String,
+    end_date: String,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
+    let args = Args::parse();
     tracing_subscriber::fmt::init();
 
     let uri = std::env::var("LAKEKEEPER_URI")
@@ -91,40 +100,30 @@ async fn main() -> Result<()> {
     ctx.register_catalog("lk", Arc::new(provider));
     eprintln!("[progress] catalog registered",);
     drop(catalog);
-    let day_sql = r#"
+    let day_sql = format!(r#"
         SELECT
             to_char(trade_ts, '%Y%m%d') AS day,
             count(*) AS cnt,
             count(DISTINCT concat(exchange, cast(trade_id as varchar), symbol)) AS cnt_dist
         FROM lk.trades.trades
-        WHERE trade_ts between TIMESTAMP '2026-08-01 00:00:00'
-        AND TIMESTAMP '2026-08-18 00:00:00'
+        WHERE trade_ts between TIMESTAMP '{}'
+        AND TIMESTAMP '{}'
         GROUP BY day
         ORDER BY day
-    "#;
+    "#, args.start_date, args.end_date);
 
     // Warm-up: plan only, no collect.
-    let df = ctx.sql(day_sql).await.context("plan day query")?;
+    let df = ctx.sql(&day_sql).await.context("plan day query")?;
     eprintln!("[progress] day query planned");
     let _plan = df.clone().explain(false, false)?;
 
     let start = Instant::now();
-    let df = ctx.sql(day_sql).await.context("run day query")?;
+    let df = ctx.sql(&day_sql).await.context("run day query")?;
     eprintln!("[progress] day query re-planned, starting show");
     df.show().await.context("show day query")?;
     let elapsed = start.elapsed();
     eprintln!("[progress] day query shown");
     println!("day-agg elapsed: {:?}", elapsed);
-
-    // Full scan count (no filter, all data) to measure raw scan throughput.
-    let start = Instant::now();
-    let df = ctx
-        .sql("SELECT count(*) AS c FROM lk.trades.trades")
-        .await
-        .context("plan count query")?;
-    df.show().await.context("show count query")?;
-    let count_elapsed = start.elapsed();
-    println!("count(*) elapsed: {:?}", count_elapsed);
 
     Ok(())
 }
