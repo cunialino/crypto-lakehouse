@@ -1,0 +1,43 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: batcher-config
+data:
+  # --- source: NATS JetStream (same stream the collector writes to) -----------------
+  NATS_URL: "nats://nats-cluster.nats.svc.cluster.local:4222"
+  TRADES_STREAM: "tradesstream"
+  TRADES_SUBJECT_FILTER: "exchange.*"
+  # The durable consumer IS the pipeline offset; it is created if missing and its
+  # ack_wait / max_ack_pending are reconciled to the values below on every start.
+  BATCHER_CONSUMER: "iceberg-batcher"
+  BATCHER_FETCH_BATCH: "2000"
+  BATCHER_FETCH_EXPIRES_SECS: "2"
+  # Must stay well above BATCH_FLUSH_INTERVAL_SECS (the batcher raises it automatically if
+  # it is not, because otherwise buffered rows would be redelivered mid-batch).
+  BATCHER_ACK_WAIT_SECS: "180"
+
+  # --- destination: Lakekeeper / Garage ---------------------------------------------
+  LAKEKEEPER_URI: "http://lakekeeper.lakekeeper.svc.cluster.local:8181/catalog"
+  LAKEKEEPER_WAREHOUSE: "crypto_lakehouse"
+  ICEBERG_NAMESPACE: "trades"
+  # New table on purpose: `trades.trades` belongs to the old RisingWave writer and
+  # `trades.trades_2` to Arroyo. Point this at whichever name should replace them.
+  ICEBERG_TABLE: "trades_rust"
+  GARAGE_ENDPOINT: "http://garage-svc.garage.svc.cluster.local:3900"
+  GARAGE_REGION: "eu-lambronx-1"
+  GARAGE_PATH_STYLE: "true"
+  ICEBERG_TARGET_FILE_SIZE: "134217728" # 128 MiB
+  ICEBERG_PARQUET_COMPRESSION: "zstd"
+  COMMIT_RETRIES: "5"
+
+  # --- micro-batching policy ---------------------------------------------------------
+  # Written data was ~10 bytes/row compressed, so size limits, not time, usually decide:
+  # a full batch is whichever of these three fires first.
+  BATCH_MAX_RECORDS: "50000"
+  BATCH_MAX_BYTES: "67108864" # 64 MiB
+  BATCH_FLUSH_INTERVAL_SECS: "15"
+  # Drop (exchange, symbol, trade_id) repeats inside one micro-batch. Cross-batch dedup
+  # stays with the Spark maintenance job, as it was under Arroyo.
+  BATCH_DEDUP: "true"
+
+  RUST_LOG: "info,iceberg=warn,iceberg_storage_opendal=warn,async_nats=warn,hyper=warn,reqwest=warn"

@@ -1,0 +1,64 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/yannh/kubernetes-json-schema/refs/heads/master/v1.34.3/deployment.json
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: iceberg-batcher
+  labels:
+    app: iceberg-batcher
+spec:
+  # Exactly one replica: the pipeline's offset is a *single* NATS durable consumer, so a
+  # second replica would just compete for the same consumer's max_ack_pending budget.
+  # Scale by sharding consumers (one table/partition per consumer) instead, if ever needed.
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: iceberg-batcher
+  template:
+    metadata:
+      labels:
+        app: iceberg-batcher
+    spec:
+      # SIGTERM -> flush the buffered micro-batch, commit, ack, exit. A commit takes
+      # ~100 ms here, but keep headroom for a slow S3/catalog.
+      terminationGracePeriodSeconds: 120
+      containers:
+        - name: init-table
+          image: custom.io/crypto-batcher:latest
+          imagePullPolicy: Always
+          args: ["--ensure-only"]
+          envFrom:
+            - configMapRef:
+                name: batcher-config
+            - secretRef:
+                name: garage-s3-credentials
+          resources:
+            requests:
+              cpu: "10m"
+              memory: "32Mi"
+            limits:
+              cpu: "500m"
+              memory: "256Mi"
+
+        - name: batcher
+          image: custom.io/crypto-batcher:latest
+          imagePullPolicy: Always
+          envFrom:
+            - configMapRef:
+                name: batcher-config
+            - secretRef:
+                name: garage-s3-credentials
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "1"
+              memory: "1Gi"
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]

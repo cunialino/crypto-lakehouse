@@ -119,6 +119,21 @@
           PROTOC = "${pkgs.protobuf}/bin/protoc";
         };
 
+        cryptoBatcher = pkgs.rustPlatform.buildRustPackage {
+          pname = "crypto-batcher";
+          version = "0.1.0";
+          cargoLock = {
+            lockFile = ./Cargo.lock;
+          };
+          src = self;
+          cargoBuildFlags = [ "-p crypto-batcher" ];
+          inherit rustToolchain;
+          inherit buildInputs;
+          inherit nativeBuildInputs;
+
+          PROTOC = "${pkgs.protobuf}/bin/protoc";
+        };
+
         dockerRootfs = pkgs.symlinkJoin {
           name = "docker-rootfs";
           paths = [
@@ -157,6 +172,26 @@
             ];
           };
         };
+        packages.dockerBatcher = pkgs.dockerTools.buildImage {
+          name = "crypto-batcher";
+          tag = "latest";
+          copyToRoot = pkgs.buildEnv {
+            name = "batcher-rootfs";
+            paths = [
+              cryptoBatcher
+              pkgs.openssl
+              pkgs.stdenv.cc.cc.lib
+            ];
+          };
+          config = {
+            Entrypoint = [ "${cryptoBatcher}/bin/crypto-batcher" ];
+            Env = [
+              "SSL_CERT_FILE=${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt"
+              "SSL_CERT_DIR=${pkgs.cacert}/etc/ssl/certs"
+            ];
+          };
+        };
+
         packages.dockerSpark = pkgs.dockerTools.buildImage {
           name = "spark";
           tag = "s0.1.4";

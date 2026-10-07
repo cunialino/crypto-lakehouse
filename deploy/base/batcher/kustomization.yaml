@@ -1,0 +1,9 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: crypto-batcher
+
+resources:
+  - garage_s3_secret.yaml
+  - batcher_config.yaml
+  - batcher.yaml
