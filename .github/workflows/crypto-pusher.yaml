@@ -31,3 +31,16 @@ jobs:
         run: |
           nix run --extra-experimental-features 'nix-command flakes' nixpkgs#skopeo -- copy --insecure-policy --dest-tls-verify=false docker-archive:"$(readlink result)" docker://$BASE:$TAG
           nix run --extra-experimental-features 'nix-command flakes' nixpkgs#skopeo -- copy --insecure-policy --dest-tls-verify=false docker-archive:"$(readlink result)" docker://$BASE:latest
+
+      # The NATS -> Iceberg micro-batcher that replaces the Arroyo lakehouse pipeline
+      # (deploy/base/batcher consumes this image).
+      - name: Build batcher image
+        run: git config --global --add safe.directory $(pwd) && nix build --extra-experimental-features 'nix-command flakes' .#dockerBatcher --out-link result-batcher
+
+      - name: Push batcher image
+        env:
+          BASE: 192.168.0.2:5000/crypto-batcher
+          TAG: ${{ github.ref_name }}
+        run: |
+          nix run --extra-experimental-features 'nix-command flakes' nixpkgs#skopeo -- copy --insecure-policy --dest-tls-verify=false docker-archive:"$(readlink result-batcher)" docker://$BASE:$TAG
+          nix run --extra-experimental-features 'nix-command flakes' nixpkgs#skopeo -- copy --insecure-policy --dest-tls-verify=false docker-archive:"$(readlink result-batcher)" docker://$BASE:latest
