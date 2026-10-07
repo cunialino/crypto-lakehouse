@@ -1,0 +1,24 @@
+# Minimal single-node Garage config for the local test stack (`teststack/`).
+#
+# Secrets deliberately live OUTSIDE this file: the `it-garage` container provides
+# GARAGE_RPC_SECRET / GARAGE_ADMIN_TOKEN as environment variables, which garage v2.3
+# reads directly (documented env overrides for `rpc_secret` / `admin.admin_token`).
+#
+# Values must stay in sync with `teststack/warehouse.json` (the Lakekeeper warehouse):
+# endpoint http://127.0.0.1:19000, region local-01, bucket "lakehouse".
+
+hostname = "garage"
+metadata_dir = "/var/lib/garage/meta"
+data_dir = "/var/lib/garage/objects"
+replication_factor = 1
+
+# All containers of the test stack run on podman's `host` network, so everything is loopback.
+rpc_bind_addr = "0.0.0.0:3901"
+rpc_public_addr = "127.0.0.1:3901"
+
+[s3_api]
+s3_region = "local-01"
+api_bind_addr = "0.0.0.0:19000"
+
+[admin]
+api_bind_addr = "0.0.0.0:3903"
