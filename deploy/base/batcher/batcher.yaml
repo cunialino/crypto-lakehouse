@@ -24,7 +24,10 @@ spec:
       # SIGTERM -> flush the buffered micro-batch, commit, ack, exit. A commit takes
       # ~100 ms here, but keep headroom for a slow S3/catalog.
       terminationGracePeriodSeconds: 120
-      containers:
+      # Must be an initContainer: `--ensure-only` creates the table and exits 0, and a
+      # clean exit 0 in `containers:` is treated as a crash -> permanent CrashLoopBackOff,
+      # which also keeps the pod permanently NotReady under strategy: Recreate.
+      initContainers:
         - name: init-table
           image: custom.io/crypto-batcher:latest
           imagePullPolicy: Always
@@ -42,6 +45,7 @@ spec:
               cpu: "500m"
               memory: "256Mi"
 
+      containers:
         - name: batcher
           image: custom.io/crypto-batcher:latest
           imagePullPolicy: Always
