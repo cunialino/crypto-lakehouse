@@ -1,0 +1,30 @@
+# Ephemeral ArgoCD app to validate feature/rust_batcher on the cluster.
+#
+# Lives in deploy/apps-test/ on purpose: the app-of-apps (`crypto-lakehouse`, tracking
+# `main`, automated + prune + selfHeal) only watches deploy/apps/, so this Application is
+# neither synced nor pruned by it. Apply/remove it by hand:
+#
+#   kubectl apply -f deploy/apps-test/crypto-lakehouse-batcher-test.yaml
+#   kubectl delete  -f deploy/apps-test/crypto-lakehouse-batcher-test.yaml
+#   kubectl delete ns crypto-batcher-test
+#
+# Image `custom.io/crypto-batcher:vtest-batcher-1` comes from the `ARC Crypto Builder`
+# workflow (triggered by pushing the `vtest-batcher-1` tag from this branch).
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: crypto-lakehouse-batcher-test
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: "https://github.com/cunialino/crypto-lakehouse.git"
+    targetRevision: feature/rust_batcher
+    path: deploy/overlays/batcher-test
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: crypto-batcher-test
+  syncPolicy:
+    # No `automated`: review the diff in the UI/CLI, then sync by hand.
+    syncOptions:
+      - CreateNamespace=true
