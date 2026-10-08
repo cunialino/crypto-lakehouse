@@ -1,0 +1,30 @@
+# Throwaway overlay for validating the Rust batcher from feature/rust_batcher.
+#
+# Differences from deploy/base/batcher (prod intent), on purpose:
+#   * namespace  -> crypto-batcher-test (teardown = delete the namespace)
+#   * image tag  -> pinned build instead of the mutable :latest
+#   * ICEBERG_TABLE / BATCHER_CONSUMER -> scratch table + scratch durable consumer,
+#     so the run cannot touch Arroyo's `trades.trades_2` nor the offset the eventual
+#     prod consumer (`iceberg-batcher`) would start from.
+#
+# Applied by deploy/apps-test/crypto-lakehouse-batcher-test.yaml (manual `kubectl apply`,
+# NOT owned by the deploy/apps app-of-apps, which tracks main).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: crypto-batcher-test
+
+resources:
+  - ../../base/batcher
+
+images:
+  - name: custom.io/crypto-batcher
+    newTag: vtest-batcher-1
+
+labels:
+  - pairs:
+      app.kubernetes.io/managed-by-test: batcher-test
+    includeSelectors: false
+
+patches:
+  - path: batcher-config-patch.yaml
