@@ -137,8 +137,22 @@ impl Accumulator {
     }
 
     /// Detaches the buffered batch and resets the accumulator.
+    ///
+    /// `seen_keys` must be reset here too, or the dedup set outlives the batch it
+    /// describes. Both halves of that matter:
+    ///
+    /// 1. memory: one `(String, String, i64)` entry per row ever processed (~150-190 B
+    ///    with the two heap strings and hashbrown overhead), so RSS tracks cumulative
+    ///    rows since process start and grows forever (observed: 140 Mi -> 546 Mi over
+    ///    3.5 M rows, OOMKilled at a 1 GiB limit).
+    /// 2. correctness: on a commit failure `flush()` skips the acks so JetStream
+    ///    redelivers, but the keys of that never-committed batch are still in the set,
+    ///    so `push()` classifies the redelivered rows as duplicates, acks and discards
+    ///    them -> the batch is lost. Clearing here means "dedup scope == one
+    ///    micro-batch", exactly what [`BatchConfig::dedup`] documents.
     pub fn take(&mut self, trigger: FlushTrigger) -> MicroBatch {
         self.first_seen = None;
+        self.seen_keys.clear();
         MicroBatch {
             rows: std::mem::take(&mut self.rows),
             acks: std::mem::take(&mut self.acks),
@@ -394,5 +408,45 @@ mod tests {
         let batch = acc.take(FlushTrigger::Interval);
         assert_eq!(batch.rows.len(), 2);
         assert_eq!(batch.duplicates_dropped, 0);
+    }
+
+    /// Regression (data loss): `take()` left `seen_keys` populated, so when JetStream
+    /// redelivered a batch whose commit *failed* — `flush()` skips the acks precisely so
+    /// those rows come back — `push()` saw the still-present keys, counted the rows as
+    /// duplicates and acked them away. Never-committed rows vanished.
+    #[test]
+    fn redelivered_rows_after_take_are_rewritten_not_dropped() {
+        let mut acc = Accumulator::new(policy());
+        acc.push(row(7));
+        acc.push(row(8));
+        assert_eq!(acc.take(FlushTrigger::Count).rows.len(), 2);
+
+        // Same ids again == redelivery of the batch we just handed to a failing commit.
+        acc.push(row(7));
+        acc.push(row(8));
+        let second = acc.take(FlushTrigger::Interval);
+        assert_eq!(second.rows.len(), 2, "redelivered rows must be rewritten");
+        assert_eq!(second.duplicates_dropped, 0);
+    }
+
+    /// Regression (leak): the dedup set kept every key for the life of the process, so
+    /// RSS tracked cumulative rows (~150-190 B each) until the container was OOMKilled.
+    #[test]
+    fn dedup_set_is_bounded_by_one_batch() {
+        let mut acc = Accumulator::new(BatchConfig {
+            max_records: 10,
+            ..policy()
+        });
+        for id in 0..100_000u64 {
+            if acc.push(row(id)) {
+                acc.take(FlushTrigger::Count);
+            }
+        }
+        assert!(
+            acc.seen_keys.len() <= acc.rows.len(),
+            "dedup set retained {} keys for {} buffered rows after 10 000 batches",
+            acc.seen_keys.len(),
+            acc.rows.len(),
+        );
     }
 }
