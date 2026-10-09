@@ -12,9 +12,13 @@ data:
   BATCHER_CONSUMER: "iceberg-batcher"
   BATCHER_FETCH_BATCH: "2000"
   BATCHER_FETCH_EXPIRES_SECS: "2"
-  # Must stay well above BATCH_FLUSH_INTERVAL_SECS (the batcher raises it automatically if
-  # it is not, because otherwise buffered rows would be redelivered mid-batch).
-  BATCHER_ACK_WAIT_SECS: "180"
+  # Must stay well above BATCH_FLUSH_INTERVAL_SECS, otherwise JetStream redelivers rows the
+  # batcher is still holding and commits them twice on purpose. effective_ack_wait()
+  # (source.rs) enforces floor = flush_interval * 4 + 10s and only warns when it has to
+  # raise this, so keep it set explicitly instead of relying on the clamp.
+  # Cost of a larger value: rows buffered-but-unacked at crash time are only redelivered
+  # once ack_wait elapses, so a pod dying mid-batch delays that data by up to ~1 h.
+  BATCHER_ACK_WAIT_SECS: "3900"
 
   # --- destination: Lakekeeper / Garage ---------------------------------------------
   LAKEKEEPER_URI: "http://lakekeeper.lakekeeper.svc.cluster.local:8181/catalog"
@@ -31,11 +35,16 @@ data:
   COMMIT_RETRIES: "5"
 
   # --- micro-batching policy ---------------------------------------------------------
-  # Written data was ~10 bytes/row compressed, so size limits, not time, usually decide:
-  # a full batch is whichever of these three fires first.
+  # A full batch is whichever of these three fires first. At the live rate (~30 rows/s, so
+  # ~30 k rows per 15 min) the interval decides; the size limits take over during a
+  # redelivery drain/backfill, which is what they are sized for.
   BATCH_MAX_RECORDS: "50000"
   BATCH_MAX_BYTES: "67108864" # 64 MiB
-  BATCH_FLUSH_INTERVAL_SECS: "15"
+  # 15 min, not 15 s: freshness of ~15 min is acceptable and it cuts commits from
+  # ~5 760/day to ~96/day (~6 k -> ~30 k rows each), which is where the small-file and
+  # commit-latency pressure came from. The count/byte limits above still win under load,
+  # so this only sets the idle-time latency floor.
+  BATCH_FLUSH_INTERVAL_SECS: "900"
   # Drop (exchange, symbol, trade_id) repeats inside one micro-batch. Cross-batch dedup
   # stays with the Spark maintenance job, as it was under Arroyo.
   BATCH_DEDUP: "true"
