@@ -8,8 +8,9 @@
 #   kubectl delete  -f deploy/apps-test/crypto-lakehouse-batcher-test.yaml
 #   kubectl delete ns crypto-batcher-test
 #
-# Image `custom.io/crypto-batcher:vtest-batcher-1` comes from the `ARC Crypto Builder`
-# workflow (triggered by pushing the `vtest-batcher-1` tag from this branch).
+# Image `custom.io/crypto-batcher:vtest-batcher-2` comes from the `ARC Crypto Builder`
+# workflow (triggered by pushing the `vtest-batcher-2` tag from this branch); it carries
+# the `--ensure-only` initContainer fix and the dedup-set scoping fix.
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
