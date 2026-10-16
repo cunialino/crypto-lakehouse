@@ -11,9 +11,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use async_nats::jetstream;
+use async_nats::jetstream::consumer::pull::Batch;
 use async_nats::jetstream::consumer::{self, AckPolicy, DeliverPolicy, PullConsumer};
 use async_nats::jetstream::stream::Stream;
+use async_nats::jetstream::{self, Message};
 use futures::StreamExt;
 use prost::Message as _;
 use tokio::sync::mpsc;
@@ -82,6 +83,58 @@ pub fn trade_channel(capacity: usize) -> (mpsc::Sender<Envelope>, TradeReceiver)
     (tx, TradeReceiver { rx })
 }
 
+/// Turns one JetStream message into an [`Envelope`]; undecodable payloads are acked here
+/// so they leave the consumer instead of poisoning the queue; those yield `None`.
+async fn process_message(msg: Message) -> Option<Envelope> {
+    let bytes = msg.payload.len();
+    match decode(&msg.payload) {
+        Some(event) => Some(Envelope {
+            event,
+            bytes,
+            ack: Ack::Nats(Box::new(msg)),
+        }),
+        None => {
+            tracing::warn!(bytes, "undecodable payload; dropping (bad_data=drop)");
+            if let Err(e) = msg.ack().await {
+                tracing::error!("failed to ack undecodable payload: {e}");
+            }
+            None
+        }
+    }
+}
+
+enum BatchOutcome {
+    Empty,
+    Drained,
+    Stopped,
+}
+
+async fn drain_batch(batch_stream: &mut Batch, tx: &mpsc::Sender<Envelope>) -> BatchOutcome {
+    let mut pulled = false;
+    while let Some(msg) = batch_stream.next().await {
+        match msg {
+            Ok(msg) => {
+                pulled = true;
+                if let Some(envelope) = process_message(msg).await
+                    && tx.send(envelope).await.is_err()
+                {
+                    tracing::info!("batcher gone; nats source stopping");
+                    return BatchOutcome::Stopped;
+                }
+            }
+            Err(e) => {
+                tracing::error!("fetch stream error: {e}");
+                break;
+            }
+        }
+    }
+    if pulled {
+        BatchOutcome::Drained
+    } else {
+        BatchOutcome::Empty
+    }
+}
+
 /// Spawns the JetStream pull loop and returns the receiving end.
 ///
 /// The consumer is durable and explicit-ack: its ack floor *is* the pipeline offset, so
@@ -123,48 +176,13 @@ pub async fn spawn_nats_source(
                 .messages()
                 .await
             {
-                Ok(mut batch_stream) => {
-                    let mut got = 0usize;
-                    while let Some(msg) = batch_stream.next().await {
-                        match msg {
-                            Ok(msg) => {
-                                got += 1;
-                                let bytes = msg.payload.len();
-                                let envelope = match decode(&msg.payload) {
-                                    Some(event) => Envelope {
-                                        event,
-                                        bytes,
-                                        ack: Ack::Nats(Box::new(msg)),
-                                    },
-                                    None => {
-                                        tracing::warn!(
-                                            bytes,
-                                            "undecodable payload; dropping (bad_data=drop)"
-                                        );
-                                        if let Err(e) = msg.ack().await {
-                                            tracing::error!(
-                                                "failed to ack undecodable payload: {e}"
-                                            );
-                                        }
-                                        continue;
-                                    }
-                                };
-                                if tx.send(envelope).await.is_err() {
-                                    tracing::info!("batcher gone; nats source stopping");
-                                    return;
-                                }
-                            }
-                            Err(e) => {
-                                tracing::error!("fetch stream error: {e}");
-                                break;
-                            }
-                        }
-                    }
-                    if got == 0 {
-                        // NO_MESSAGES / expired pull: back off a hair instead of hammering the API.
+                Ok(mut batch_stream) => match drain_batch(&mut batch_stream, &tx).await {
+                    BatchOutcome::Empty => {
                         tokio::time::sleep(Duration::from_millis(50)).await;
                     }
-                }
+                    BatchOutcome::Drained => {}
+                    BatchOutcome::Stopped => return,
+                },
                 Err(e) => {
                     tracing::error!("pull fetch failed: {e}; retrying in 1s");
                     tokio::time::sleep(Duration::from_secs(1)).await;
