@@ -17,6 +17,11 @@ spec:
         valuesObject:
           postgresql:
             enabled: false
+          secretBackend:
+            type: postgres
+            postgres:
+              encryptionKeySecret: lakekeeper-pg-encryption-key
+              encryptionKeySecretKey: encryptionKey
           externalDatabase:
             host_read: pg-cluster-ro.cnpg-system.svc.cluster.local
             host_write: pg-cluster-rw.cnpg-system.svc.cluster.local
