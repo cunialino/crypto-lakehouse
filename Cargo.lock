@@ -1282,6 +1282,7 @@ dependencies = [
  "futures",
  "iceberg",
  "iceberg-catalog-rest",
+ "iceberg-datafusion",
  "iceberg-storage-opendal",
  "itertools 0.15.0",
  "parquet 58.4.0",
