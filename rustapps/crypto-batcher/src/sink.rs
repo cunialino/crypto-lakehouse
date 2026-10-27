@@ -12,11 +12,15 @@
 //! One micro-batch == one snapshot == the atomic unit of visibility, which is also what
 //! makes the pipeline's "ack after commit" safe.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
+use arrow_array::{Array, RecordBatch, StringArray, TimestampMicrosecondArray};
+use datafusion::arrow::compute::concat_batches;
+use datafusion::execution::context::SessionContext;
+use datafusion::logical_expr::Expr;
 use futures::TryFutureExt;
 use iceberg::io::{
     S3_ACCESS_KEY_ID, S3_ENDPOINT, S3_PATH_STYLE_ACCESS, S3_REGION, S3_SECRET_ACCESS_KEY,
@@ -36,6 +40,7 @@ use iceberg::{Catalog, CatalogBuilder, NamespaceIdent, TableCreation, TableIdent
 use iceberg_catalog_rest::{
     REST_CATALOG_PROP_URI, REST_CATALOG_PROP_WAREHOUSE, RestCatalogBuilder,
 };
+use iceberg_datafusion::IcebergStaticTableProvider;
 use iceberg_storage_opendal::OpenDalStorageFactory;
 use parquet::basic::{Compression as ParquetCompression, ZstdLevel};
 use parquet::file::properties::{WriterProperties, WriterVersion};
@@ -63,6 +68,92 @@ pub struct IcebergSink {
     /// across flushes; the uuid keeps them unique across restarts.
     file_name_gen: DefaultFileNameGenerator,
     cfg: IcebergConfig,
+    ctx: SessionContext,
+}
+
+fn build_pruning_expr(batch: &RecordBatch, schema: &arrow_schema::Schema) -> Result<Expr> {
+    let ts_dt = schema
+        .field_with_name("trade_ts")
+        .context("iceberg schema has no `trade_ts`")?
+        .data_type()
+        .clone();
+    let ts = col_as::<TimestampMicrosecondArray>(batch, "trade_ts")?;
+    let ts_lit = |v: i64| -> Result<Expr> {
+        let sv = match &ts_dt {
+            arrow_schema::DataType::Timestamp(arrow_schema::TimeUnit::Microsecond, tz) => {
+                datafusion::scalar::ScalarValue::TimestampMicrosecond(Some(v), tz.clone())
+            }
+            arrow_schema::DataType::Timestamp(arrow_schema::TimeUnit::Nanosecond, tz) => {
+                datafusion::scalar::ScalarValue::TimestampNanosecond(
+                    Some(v.checked_mul(1_000).context("ns overflow")?),
+                    tz.clone(),
+                )
+            }
+            arrow_schema::DataType::Timestamp(arrow_schema::TimeUnit::Millisecond, tz) => {
+                datafusion::scalar::ScalarValue::TimestampMillisecond(
+                    Some(v.div_euclid(1_000)),
+                    tz.clone(),
+                )
+            }
+            arrow_schema::DataType::Timestamp(arrow_schema::TimeUnit::Second, tz) => {
+                datafusion::scalar::ScalarValue::TimestampSecond(
+                    Some(v.div_euclid(1_000_000)),
+                    tz.clone(),
+                )
+            }
+            other => panic!("iceberg `trade_ts` is {other:?}, expected a timestamp"),
+        };
+        Ok(datafusion::logical_expr::lit(sv))
+    };
+
+    let ex = col_as::<StringArray>(batch, "exchange")?;
+    let sym = col_as::<StringArray>(batch, "symbol")?;
+    const MICROS_PER_DAY: i64 = 86_400_000_000;
+
+    let mut groups: HashMap<(&str, i64), (i64, i64)> = HashMap::new(); // (exchange, day) → ts bounds
+    let mut syms: HashSet<&str> = HashSet::new();
+
+    for i in 0..batch.num_rows() {
+        if ts.is_null(i) || ex.is_null(i) || sym.is_null(i) {
+            continue;
+        }
+        let t = ts.value(i);
+        let g = groups
+            .entry((ex.value(i), t.div_euclid(MICROS_PER_DAY)))
+            .or_insert((i64::MAX, i64::MIN));
+        g.0 = g.0.min(t);
+        g.1 = g.1.max(t);
+        syms.insert(sym.value(i));
+    }
+
+    let pruning = groups
+        .iter()
+        .map(|((e, _day), (lo, hi))| -> Result<Expr> {
+            let ll = ts_lit(*lo)?;
+            let hh = ts_lit(*hi)?;
+            Ok(datafusion::logical_expr::col("exchange")
+                .eq(datafusion::logical_expr::lit(*e))
+                .and(datafusion::logical_expr::col("trade_ts").gt_eq(ll))
+                .and(datafusion::logical_expr::col("trade_ts").lt_eq(hh)))
+        })
+        .collect::<Result<Vec<Expr>, _>>()? // ← ts_lit can fail; fold can't carry errors
+        .into_iter()
+        .fold(datafusion::logical_expr::lit(false), Expr::or);
+
+    Ok(pruning)
+}
+
+fn col_as<'a, A: Array + 'static>(batch: &'a RecordBatch, name: &str) -> anyhow::Result<&'a A> {
+    let arr = batch
+        .column_by_name(name)
+        .ok_or_else(|| anyhow::anyhow!("missing column `{name}`"))?;
+
+    let typed = arr
+        .as_any()
+        .downcast_ref::<A>()
+        .ok_or_else(|| anyhow::anyhow!("column `{name}` not a {}", std::any::type_name::<A>()))?;
+
+    Ok(typed)
 }
 
 impl IcebergSink {
@@ -96,6 +187,10 @@ impl IcebergSink {
             "iceberg sink ready"
         );
 
+        let ctx = SessionContext::new();
+        let provider = IcebergStaticTableProvider::try_new_from_table(table.clone()).await?;
+        ctx.register_table("icetbl", Arc::new(provider))?;
+
         Ok(Self {
             catalog,
             ident,
@@ -106,6 +201,7 @@ impl IcebergSink {
                 DataFileFormat::Parquet,
             ),
             cfg,
+            ctx,
         })
     }
 
@@ -120,6 +216,35 @@ impl IcebergSink {
             .await
             .with_context(|| format!("failed to reload table {}", self.ident))?;
         Ok(())
+    }
+
+    async fn deduped_batch(
+        &self,
+        incoming: &RecordBatch,
+        schema: &arrow_schema::Schema,
+    ) -> Result<Vec<RecordBatch>> {
+        self.ctx.register_batch("incoming", incoming.clone())?;
+
+        let pruning = build_pruning_expr(incoming, schema)?;
+
+        let cand = self.ctx.table("icetbl").await?.filter(pruning)?;
+
+        let out = self
+            .ctx
+            .table("incoming")
+            .await?
+            .join(
+                cand,
+                datafusion::common::JoinType::LeftAnti,
+                &["exchange", "symbol", "trade_id"],
+                &["exchange", "symbol", "trade_id"],
+                None,
+            )?
+            .collect()
+            .await?;
+
+        self.ctx.deregister_table("incoming")?;
+        Ok(out)
     }
 
     /// Writes all rows of one micro-batch and commits them as one snapshot.
@@ -168,13 +293,15 @@ impl IcebergSink {
         let partition_spec = metadata.default_partition_spec().clone();
 
         let batch = schema::to_record_batch(&arrow_schema, rows)?;
+        let deduped_batches = self.deduped_batch(&batch, &arrow_schema).await.unwrap();
+        let batched_dep = concat_batches(&arrow_schema, &deduped_batches)?;
         let splitter = iceberg::arrow::RecordBatchPartitionSplitter::try_new_with_computed_values(
             iceberg_schema.clone(),
             partition_spec.clone(),
         )
         .context("failed to build partition splitter")?;
         let partitions = splitter
-            .split(&batch)
+            .split(&batched_dep)
             .context("failed to split micro-batch by partition")?;
 
         let parquet_builder = ParquetWriterBuilder::new(
