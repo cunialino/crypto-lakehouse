@@ -19,7 +19,7 @@ resources:
 
 images:
   - name: custom.io/crypto-batcher
-    newTag: vtest-batcher-2
+    newTag: vtest-batcher-3
 
 labels:
   - pairs:
