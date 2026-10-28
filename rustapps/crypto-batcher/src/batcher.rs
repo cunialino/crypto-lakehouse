@@ -173,6 +173,13 @@ pub struct Stats {
     pub duplicates_dropped: u64,
     pub failed_commits: u64,
     pub ack_failures: u64,
+    /// Data files the dedup probes opened in total. `probe_files_opened / batches` is the
+    /// average read per micro-batch; it should follow the `(exchange, day)` spread of the
+    /// traffic, not the size of the table.
+    pub probe_files_opened: u64,
+    /// Sum of the table's data-file counts over flushes; divide by `batches` for the
+    /// average size of the table the probes keep choosing from.
+    pub table_files_seen: u64,
 }
 
 /// Runs the batch loop until the source ends or `shutdown` fires.
@@ -275,6 +282,8 @@ pub async fn flush(
     stats.files += written.files as u64;
     stats.bytes += written.bytes;
     stats.ack_failures += ack_failures as u64;
+    stats.probe_files_opened += written.probe.files_opened as u64;
+    stats.table_files_seen += written.probe.data_files as u64;
 
     tracing::info!(
         trigger = ?batch.trigger,
@@ -284,10 +293,15 @@ pub async fn flush(
         bytes = written.bytes,
         write_ms = written.write_elapsed.as_millis() as u64,
         commit_ms = written.commit_elapsed.as_millis() as u64,
+        probe_files = written.probe.files_opened,
+        probe_partitions = written.probe.partitions_opened,
+        probe_bytes = written.probe.bytes_opened,
+        table_files = written.probe.data_files,
         duplicates_dropped = batch.duplicates_dropped,
         ack_failures,
         total_batches = stats.batches,
         total_rows = stats.rows,
+        total_probe_files = stats.probe_files_opened,
         "flushed micro-batch to iceberg"
     );
     Some(written)

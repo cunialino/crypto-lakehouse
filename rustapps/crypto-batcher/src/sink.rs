@@ -23,7 +23,7 @@ use datafusion::catalog::CatalogProvider;
 use datafusion::datasource::TableProvider;
 use datafusion::execution::context::SessionContext;
 use datafusion::logical_expr::Expr;
-use futures::TryFutureExt;
+use futures::{TryFutureExt, TryStreamExt};
 use iceberg::io::{
     S3_ACCESS_KEY_ID, S3_ENDPOINT, S3_PATH_STYLE_ACCESS, S3_REGION, S3_SECRET_ACCESS_KEY,
 };
@@ -43,6 +43,7 @@ use iceberg_catalog_rest::{
     REST_CATALOG_PROP_URI, REST_CATALOG_PROP_WAREHOUSE, RestCatalogBuilder,
 };
 use iceberg_datafusion::IcebergCatalogProvider;
+use iceberg_datafusion::physical_plan::convert_filters_to_predicate;
 use iceberg_storage_opendal::OpenDalStorageFactory;
 use parquet::basic::{Compression as ParquetCompression, ZstdLevel};
 use parquet::file::properties::{WriterProperties, WriterVersion};
@@ -60,6 +61,19 @@ pub struct WriteStats {
     pub bytes: u64,
     pub write_elapsed: Duration,
     pub commit_elapsed: Duration,
+    pub probe: ProbeStats,
+}
+
+/// What one dedup probe read, so a flush log line can show whether the pruning expression
+/// is still doing its job: `files_opened` tracks the `(exchange, day)` spread of the
+/// micro-batch, while `data_files` only ever grows.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct ProbeStats {
+    pub files_opened: usize,
+    pub partitions_opened: usize,
+    pub bytes_opened: u64,
+    /// Data files in the snapshot the probe read; `0` for a table with no snapshot yet.
+    pub data_files: usize,
 }
 
 pub struct IcebergSink {
@@ -140,7 +154,12 @@ fn build_pruning_expr(batch: &RecordBatch, schema: &arrow_schema::Schema) -> Res
         })
         .collect::<Result<Vec<Expr>, _>>()? // ← ts_lit can fail; fold can't carry errors
         .into_iter()
-        .fold(datafusion::logical_expr::lit(false), Expr::or);
+        // `reduce`, not `fold(lit(false))`: iceberg's translator rejects any OR that has a
+        // literal side, so a `false` seed would silently cost the probe its pushdown.
+        // `probe_stats` converts this same expression, and the flush test asserts both
+        // sides agree.
+        .reduce(Expr::or)
+        .unwrap_or_else(|| datafusion::logical_expr::lit(false));
 
     Ok(pruning)
 }
@@ -220,7 +239,7 @@ impl IcebergSink {
     }
 
     /// The probe side of the dedup anti-join: committed rows restricted to the
-    /// `(exchange, trade_ts)` ranges of `incoming`.
+    /// `(exchange, trade_ts)` ranges of `incoming`, plus what that restriction costs.
     ///
     /// The restriction is what keeps the probe cheap — DataFusion hands the predicate to
     /// the Iceberg scan, which drops whole data files (partition + column-range metrics)
@@ -229,22 +248,20 @@ impl IcebergSink {
         &self,
         incoming: &RecordBatch,
         schema: &arrow_schema::Schema,
-    ) -> Result<datafusion::dataframe::DataFrame> {
-        Ok(self
-            .ctx
-            .table("icetbl")
-            .await?
-            .filter(build_pruning_expr(incoming, schema)?)?)
+    ) -> Result<(datafusion::dataframe::DataFrame, ProbeStats)> {
+        let pruning = build_pruning_expr(incoming, schema)?;
+        let probe = self.probe_stats(&pruning).await?;
+        Ok((self.ctx.table("icetbl").await?.filter(pruning)?, probe))
     }
 
     async fn deduped_batch(
         &self,
         incoming: &RecordBatch,
         schema: &arrow_schema::Schema,
-    ) -> Result<Vec<RecordBatch>> {
+    ) -> Result<(Vec<RecordBatch>, ProbeStats)> {
         self.ctx.register_batch("incoming", incoming.clone())?;
 
-        let cand = self.dedup_probe(incoming, schema).await?;
+        let (cand, probe) = self.dedup_probe(incoming, schema).await?;
 
         let out = self
             .ctx
@@ -261,7 +278,43 @@ impl IcebergSink {
             .await?;
 
         self.ctx.deregister_table("incoming")?;
-        Ok(out)
+        Ok((out, probe))
+    }
+
+    /// How much of the table the probe's predicate opens, planned with the very predicate
+    /// the scan is handed and against the snapshot that scan will load — the two halves of
+    /// a `probe_files=N of M` log line are only comparable if they name the same snapshot.
+    ///
+    /// Costs one metadata load plus one manifest planning pass per micro-batch; no data
+    /// file is read twice, since this only walks manifests.
+    async fn probe_stats(&self, pruning: &Expr) -> Result<ProbeStats> {
+        let table = self
+            .catalog
+            .load_table(&self.ident)
+            .await
+            .context("failed to load table for probe statistics")?;
+
+        let mut scan = table.scan().select_all();
+        if let Some(predicate) = convert_filters_to_predicate(std::slice::from_ref(pruning)) {
+            scan = scan.with_filter(predicate);
+        }
+        let tasks = scan
+            .build()?
+            .plan_files()
+            .await?
+            .try_collect::<Vec<_>>()
+            .await?;
+
+        Ok(ProbeStats {
+            files_opened: tasks.len(),
+            partitions_opened: tasks
+                .iter()
+                .map(|task| partition_dirs(task.data_file_path()))
+                .collect::<HashSet<_>>()
+                .len(),
+            bytes_opened: tasks.iter().map(|task| task.file_size_in_bytes).sum(),
+            data_files: total_data_files(&table),
+        })
     }
 
     /// Writes all rows of one micro-batch and commits them as one snapshot.
@@ -278,7 +331,7 @@ impl IcebergSink {
         }
 
         let write_start = Instant::now();
-        let data_files = self.write_files(rows).await?;
+        let (data_files, probe) = self.write_files(rows).await?;
         let write_elapsed = write_start.elapsed();
 
         let file_count = data_files.len();
@@ -300,17 +353,21 @@ impl IcebergSink {
             bytes,
             write_elapsed,
             commit_elapsed,
+            probe,
         })
     }
 
-    async fn write_files(&self, rows: &[TradeEvent]) -> Result<Vec<iceberg::spec::DataFile>> {
+    async fn write_files(
+        &self,
+        rows: &[TradeEvent],
+    ) -> Result<(Vec<iceberg::spec::DataFile>, ProbeStats)> {
         let metadata = self.table.metadata();
         let iceberg_schema = metadata.current_schema().clone();
         let arrow_schema = schema::arrow_schema(&iceberg_schema)?;
         let partition_spec = metadata.default_partition_spec().clone();
 
         let batch = schema::to_record_batch(&arrow_schema, rows)?;
-        let deduped_batches = self.deduped_batch(&batch, &arrow_schema).await?;
+        let (deduped_batches, probe) = self.deduped_batch(&batch, &arrow_schema).await?;
         let batched_dep = concat_batches(&arrow_schema, &deduped_batches)?;
         let splitter = iceberg::arrow::RecordBatchPartitionSplitter::try_new_with_computed_values(
             iceberg_schema.clone(),
@@ -341,10 +398,13 @@ impl IcebergSink {
                 .await
                 .context("failed to write partition rows")?;
         }
-        writer
-            .close()
-            .await
-            .context("failed to close parquet writer")
+        Ok((
+            writer
+                .close()
+                .await
+                .context("failed to close parquet writer")?,
+            probe,
+        ))
     }
 
     async fn commit(&mut self, data_files: Vec<iceberg::spec::DataFile>) -> Result<()> {
@@ -417,6 +477,31 @@ async fn probe_view_provider(
             cfg.namespace, cfg.table
         )
     })
+}
+
+/// `total-data-files` of the current snapshot summary, which Iceberg maintains on every
+/// append — reading it costs nothing, unlike counting manifest entries.
+fn total_data_files(table: &Table) -> usize {
+    table
+        .metadata()
+        .current_snapshot()
+        .and_then(|snapshot| {
+            snapshot
+                .summary()
+                .additional_properties
+                .get("total-data-files")
+        })
+        .and_then(|count| count.parse().ok())
+        .unwrap_or(0)
+}
+
+/// The partition directories of a data file path, e.g.
+/// `exchange=BINANCE/trade_ts_day=2026-08-07`.
+fn partition_dirs(path: &str) -> String {
+    path.split('/')
+        .filter(|segment| segment.contains('='))
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 fn catalog_props(cfg: &IcebergConfig) -> HashMap<String, String> {
@@ -685,6 +770,7 @@ mod tests {
             .dedup_probe(&incoming_batch(sink, rows), &table_arrow_schema(sink))
             .await
             .unwrap()
+            .0
             .create_physical_plan()
             .await
             .unwrap();
@@ -731,7 +817,8 @@ mod tests {
         let out = sink
             .deduped_batch(&incoming, &table_arrow_schema(sink))
             .await
-            .unwrap();
+            .unwrap()
+            .0;
         out.iter()
             .flat_map(|b| {
                 let ids = b
@@ -862,6 +949,83 @@ mod tests {
         assert_eq!(surviving_rows(&sink, &[evt(7, "OKX", 1, 5)]).await, vec![7]);
     }
 
+    /// Pruning is load-bearing for *correctness*, not only for cost. The anti-join matches
+    /// on `(exchange, symbol, trade_id)` and ignores `trade_ts`, so a new trade reusing an
+    /// id already stored for that exchange/symbol on another day is written only because
+    /// the probe never opens that other day's file. Widen the probe (drop the `trade_ts`
+    /// bounds, or push no predicate at all) and this row is dropped *and acked*: silent
+    /// data loss, not a slow query.
+    #[tokio::test]
+    async fn same_trade_id_on_another_day_is_not_a_duplicate() {
+        let catalog = memory_catalog().await;
+        let mut writer = memory_sink(catalog.clone()).await;
+        writer
+            .write_batch(&[evt(7, "BINANCE", 0, 0)])
+            .await
+            .unwrap();
+        let sink = memory_sink(catalog).await;
+
+        let opened = probe_files(&sink, &[evt(7, "BINANCE", 1, 0)]).await;
+        assert!(
+            opened.is_empty(),
+            "the BINANCE/{DAY_0_DIR} file must be pruned for the right reason: {opened:?}"
+        );
+        assert_eq!(
+            surviving_rows(&sink, &[evt(7, "BINANCE", 1, 0)]).await,
+            vec![7],
+            "same id, other day: kept because the day-0 file was never opened"
+        );
+    }
+
+    /// What every flush logs (`probe_files=N of M`): the files the probe planned to read
+    /// against the files the snapshot it read holds. Both halves come from the same
+    /// snapshot, and the counters are what make a pruning regression visible in production
+    /// instead of only in here.
+    #[tokio::test]
+    async fn flush_logs_probe_files_read_against_files_in_the_table() {
+        let catalog = memory_catalog().await;
+        let mut sink = memory_sink(catalog).await;
+
+        let first = sink
+            .write_batch(&[evt(0, "BINANCE", 0, 0), evt(0, "OKX", 0, 0)])
+            .await
+            .unwrap();
+        assert_eq!(first.files, 2);
+        assert_eq!(
+            probe_counts(first.probe),
+            (0, 0, 0),
+            "no snapshot to probe yet"
+        );
+        assert_eq!(first.probe.bytes_opened, 0);
+
+        // Same partition and overlapping timestamp: the one BINANCE file must be read,
+        // the OKX one must not, and M must have grown by the 2 files just committed.
+        let second = sink.write_batch(&[evt(1, "BINANCE", 0, 0)]).await.unwrap();
+        assert_eq!(second.files, 1);
+        assert_eq!(probe_counts(second.probe), (1, 1, 2));
+        assert!(second.probe.bytes_opened > 0);
+
+        // A micro-batch spread over two exchanges and two days opens one file per touched
+        // partition — including all of them, so the counter is not vacuously small.
+        let third = sink
+            .write_batch(&[
+                evt(2, "BINANCE", 0, 0),
+                evt(1, "OKX", 0, 0),
+                evt(0, "BINANCE", 1, 0),
+            ])
+            .await
+            .unwrap();
+        assert_eq!(probe_counts(third.probe), (3, 2, 3));
+    }
+
+    fn probe_counts(probe: ProbeStats) -> (usize, usize, usize) {
+        (
+            probe.files_opened,
+            probe.partitions_opened,
+            probe.data_files,
+        )
+    }
+
     /// Both behaviours the dedup probe has to get right, measured on the same three
     /// redelivered trades:
     ///
@@ -891,7 +1055,7 @@ mod tests {
             .await
             .unwrap();
         batcher
-            .write_batch(&[evt(2, "BINANCE", 0, 40), evt(0, "BINANCE", 1, 0)])
+            .write_batch(&[evt(2, "BINANCE", 0, 40), evt(100, "BINANCE", 1, 0)])
             .await
             .unwrap();
         let committed = files_of(batcher.table(), None).await;
@@ -902,7 +1066,7 @@ mod tests {
         let redelivered = [
             evt(0, "BINANCE", 0, 0),
             evt(2, "BINANCE", 0, 40),
-            evt(0, "BINANCE", 1, 0),
+            evt(100, "BINANCE", 1, 0),
         ];
 
         // ---- behaviour 1 + 2, on a batcher that starts now --------------------------
