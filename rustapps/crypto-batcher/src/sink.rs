@@ -19,6 +19,8 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use arrow_array::{Array, RecordBatch, StringArray, TimestampMicrosecondArray};
 use datafusion::arrow::compute::concat_batches;
+use datafusion::catalog::CatalogProvider;
+use datafusion::datasource::TableProvider;
 use datafusion::execution::context::SessionContext;
 use datafusion::logical_expr::Expr;
 use futures::TryFutureExt;
@@ -40,7 +42,7 @@ use iceberg::{Catalog, CatalogBuilder, NamespaceIdent, TableCreation, TableIdent
 use iceberg_catalog_rest::{
     REST_CATALOG_PROP_URI, REST_CATALOG_PROP_WAREHOUSE, RestCatalogBuilder,
 };
-use iceberg_datafusion::IcebergStaticTableProvider;
+use iceberg_datafusion::IcebergCatalogProvider;
 use iceberg_storage_opendal::OpenDalStorageFactory;
 use parquet::basic::{Compression as ParquetCompression, ZstdLevel};
 use parquet::file::properties::{WriterProperties, WriterVersion};
@@ -188,8 +190,7 @@ impl IcebergSink {
         );
 
         let ctx = SessionContext::new();
-        let provider = IcebergStaticTableProvider::try_new_from_table(table.clone()).await?;
-        ctx.register_table("icetbl", Arc::new(provider))?;
+        ctx.register_table("icetbl", probe_view_provider(&catalog, &cfg).await?)?;
 
         Ok(Self {
             catalog,
@@ -218,6 +219,24 @@ impl IcebergSink {
         Ok(())
     }
 
+    /// The probe side of the dedup anti-join: committed rows restricted to the
+    /// `(exchange, trade_ts)` ranges of `incoming`.
+    ///
+    /// The restriction is what keeps the probe cheap — DataFusion hands the predicate to
+    /// the Iceberg scan, which drops whole data files (partition + column-range metrics)
+    /// before reading them. Tests assert exactly that, see the `probe_*` tests below.
+    async fn dedup_probe(
+        &self,
+        incoming: &RecordBatch,
+        schema: &arrow_schema::Schema,
+    ) -> Result<datafusion::dataframe::DataFrame> {
+        Ok(self
+            .ctx
+            .table("icetbl")
+            .await?
+            .filter(build_pruning_expr(incoming, schema)?)?)
+    }
+
     async fn deduped_batch(
         &self,
         incoming: &RecordBatch,
@@ -225,9 +244,7 @@ impl IcebergSink {
     ) -> Result<Vec<RecordBatch>> {
         self.ctx.register_batch("incoming", incoming.clone())?;
 
-        let pruning = build_pruning_expr(incoming, schema)?;
-
-        let cand = self.ctx.table("icetbl").await?.filter(pruning)?;
+        let cand = self.dedup_probe(incoming, schema).await?;
 
         let out = self
             .ctx
@@ -293,7 +310,7 @@ impl IcebergSink {
         let partition_spec = metadata.default_partition_spec().clone();
 
         let batch = schema::to_record_batch(&arrow_schema, rows)?;
-        let deduped_batches = self.deduped_batch(&batch, &arrow_schema).await.unwrap();
+        let deduped_batches = self.deduped_batch(&batch, &arrow_schema).await?;
         let batched_dep = concat_batches(&arrow_schema, &deduped_batches)?;
         let splitter = iceberg::arrow::RecordBatchPartitionSplitter::try_new_with_computed_values(
             iceberg_schema.clone(),
@@ -378,6 +395,28 @@ impl IcebergSink {
             .await
             .with_context(|| format!("failed to commit snapshot to {}", self.ident))
     }
+}
+
+/// The dedup probe's read side: the catalog-backed provider, which re-loads the table
+/// metadata on every scan so a probe sees what is committed right now — including the
+/// snapshots this process wrote a moment ago and the ones its replicas wrote. (The static
+/// provider would pin the snapshot of the moment the sink was built.)
+async fn probe_view_provider(
+    catalog: &Arc<dyn Catalog>,
+    cfg: &IcebergConfig,
+) -> Result<Arc<dyn TableProvider>> {
+    let df_catalog = IcebergCatalogProvider::try_new(catalog.clone())
+        .await
+        .context("failed to expose the iceberg catalog to datafusion")?;
+    let schema = df_catalog
+        .schema(&cfg.namespace)
+        .with_context(|| format!("datafusion does not see namespace {}", cfg.namespace))?;
+    schema.table(&cfg.table).await?.with_context(|| {
+        format!(
+            "datafusion does not see table {}.{}",
+            cfg.namespace, cfg.table
+        )
+    })
 }
 
 fn catalog_props(cfg: &IcebergConfig) -> HashMap<String, String> {
@@ -516,5 +555,389 @@ mod tests {
             Some("sk")
         );
         assert!(!props.contains_key("credential"));
+    }
+
+    // ---- dedup probe: does it really prune files? -------------------------------------
+    //
+    // The probe is only worth its latency if Iceberg drops data files before reading
+    // them. Two independent things can go wrong and neither shows up in the *rows* the
+    // pipeline writes: a predicate DataFusion cannot translate means `FilterExec` over a
+    // full scan (correct, but reads the table on every flush), and a probe that prunes
+    // too aggressively silently lets duplicates through. So assert on the files, not just
+    // on the rows.
+
+    use datafusion::physical_plan::ExecutionPlan;
+    use futures::TryStreamExt;
+    use iceberg::memory::{MEMORY_CATALOG_WAREHOUSE, MemoryCatalogBuilder};
+    use iceberg_datafusion::physical_plan::IcebergTableScan;
+
+    /// 2026-08-07T00:00:00Z, so `day` 0 and 1 land in two distinct `trade_ts_day=` dirs.
+    const BASE_MS: u64 = 1_786_060_800_000;
+    const DAY_MS: u64 = 86_400_000;
+    const DAY_0_DIR: &str = "trade_ts_day=2026-08-07";
+    const DAY_1_DIR: &str = "trade_ts_day=2026-08-08";
+
+    fn evt(trade_id: u64, exchange: &str, day: u64, offset_ms: u64) -> TradeEvent {
+        let ms = BASE_MS + day * DAY_MS + offset_ms;
+        TradeEvent {
+            event_time: ms,
+            symbol: "BTCUSDT".into(),
+            exchange: exchange.into(),
+            trade_id,
+            price: 1.0,
+            quantity: 1.0,
+            trade_time: ms,
+            is_buyer_maker: false,
+            is_best_price_match: true,
+        }
+    }
+
+    fn test_config() -> IcebergConfig {
+        IcebergConfig {
+            uri: "http://unused.invalid/catalog".into(),
+            warehouse: "unused".into(),
+            credential: None,
+            namespace: "trades".into(),
+            table: "trades_mem".into(),
+            s3_endpoint: "http://unused.invalid".into(),
+            s3_region: "unused".into(),
+            s3_access_key_id: "unused".into(),
+            s3_secret_access_key: "unused".into(),
+            s3_path_style: true,
+            parquet_compression: "zstd".into(),
+            target_file_size: 8 * 1024 * 1024,
+            commit_retries: 1,
+        }
+    }
+
+    async fn memory_sink(catalog: Arc<dyn Catalog>) -> IcebergSink {
+        IcebergSink::with_catalog(catalog, test_config())
+            .await
+            .expect("sink auto-creates the table")
+    }
+
+    async fn memory_catalog() -> Arc<dyn Catalog> {
+        Arc::new(
+            MemoryCatalogBuilder::default()
+                .load(
+                    "memory",
+                    HashMap::from([(MEMORY_CATALOG_WAREHOUSE.to_string(), "memory://wh".into())]),
+                )
+                .await
+                .expect("memory catalog"),
+        )
+    }
+
+    fn table_arrow_schema(sink: &IcebergSink) -> Arc<arrow_schema::Schema> {
+        crate::schema::arrow_schema(sink.table.metadata().current_schema()).unwrap()
+    }
+
+    fn incoming_batch(sink: &IcebergSink, rows: &[TradeEvent]) -> RecordBatch {
+        crate::schema::to_record_batch(&table_arrow_schema(sink), rows).unwrap()
+    }
+
+    fn plan_text(plan: &dyn ExecutionPlan) -> String {
+        let mut s = datafusion::physical_plan::displayable(plan)
+            .indent(true)
+            .to_string();
+        for child in plan.children() {
+            s.push_str(&plan_text(&**child));
+        }
+        s
+    }
+
+    fn iceberg_scans(plan: &dyn ExecutionPlan) -> Vec<&IcebergTableScan> {
+        let mut scans: Vec<&IcebergTableScan> = plan
+            .as_any()
+            .downcast_ref::<IcebergTableScan>()
+            .into_iter()
+            .collect();
+        for child in plan.children() {
+            scans.extend(iceberg_scans(&**child));
+        }
+        scans
+    }
+
+    /// What the probe really does, read off the physical plan of the real query: the
+    /// predicate it pushes into Iceberg and the table snapshot it reads.
+    ///
+    /// The snapshot matters: pruning can only ever pick files out of the files that
+    /// snapshot has, so `table` — not `IcebergSink::table()` — is the denominator.
+    struct ProbeView {
+        predicate: iceberg::expr::Predicate,
+        table: Table,
+    }
+
+    impl ProbeView {
+        /// Files this probe opens: the pruned subset of `Self::visible_files`.
+        async fn opened_files(&self) -> Vec<String> {
+            files_of(&self.table, Some(self.predicate.clone())).await
+        }
+
+        /// Files the probe could have opened, i.e. everything its snapshot holds.
+        async fn visible_files(&self) -> Vec<String> {
+            files_of(&self.table, None).await
+        }
+    }
+
+    async fn probe_view(sink: &IcebergSink, rows: &[TradeEvent]) -> ProbeView {
+        let plan = sink
+            .dedup_probe(&incoming_batch(sink, rows), &table_arrow_schema(sink))
+            .await
+            .unwrap()
+            .create_physical_plan()
+            .await
+            .unwrap();
+        let text = plan_text(&*plan);
+        let scans = iceberg_scans(&*plan);
+        assert_eq!(
+            scans.len(),
+            1,
+            "probe should read the iceberg table once:\n{text}"
+        );
+        ProbeView {
+            predicate: scans[0].predicates().cloned().unwrap_or_else(|| {
+                panic!("probe pushed no predicate down: every flush reads every file\n{text}")
+            }),
+            table: scans[0].table().clone(),
+        }
+    }
+
+    /// Data files the probe would open for `rows`, as paths.
+    async fn probe_files(sink: &IcebergSink, rows: &[TradeEvent]) -> Vec<String> {
+        probe_view(sink, rows).await.opened_files().await
+    }
+
+    async fn files_of(table: &Table, predicate: Option<iceberg::expr::Predicate>) -> Vec<String> {
+        let mut builder = table.scan().select_all();
+        if let Some(p) = predicate {
+            builder = builder.with_filter(p);
+        }
+        builder
+            .build()
+            .unwrap()
+            .plan_files()
+            .await
+            .unwrap()
+            .map_ok(|task| task.data_file_path().to_string())
+            .try_collect()
+            .await
+            .unwrap()
+    }
+
+    /// Rows the anti-join keeps, i.e. rows that would actually be written.
+    async fn surviving_rows(sink: &IcebergSink, rows: &[TradeEvent]) -> Vec<u64> {
+        let incoming = incoming_batch(sink, rows);
+        let out = sink
+            .deduped_batch(&incoming, &table_arrow_schema(sink))
+            .await
+            .unwrap();
+        out.iter()
+            .flat_map(|b| {
+                let ids = b
+                    .column_by_name("trade_id")
+                    .unwrap()
+                    .as_any()
+                    .downcast_ref::<arrow_array::Int64Array>()
+                    .unwrap();
+                (0..ids.len()).map(|i| ids.value(i) as u64)
+            })
+            .collect()
+    }
+
+    /// The predicate must reach the Iceberg scan: one range per `(exchange, day)` group of
+    /// the micro-batch, otherwise the probe is a full-table read wearing a filter.
+    #[tokio::test]
+    async fn probe_pushes_one_pruning_range_per_exchange_and_day() {
+        let sink = memory_sink(memory_catalog().await).await;
+        let predicate = probe_view(
+            &sink,
+            &[
+                evt(0, "BINANCE", 0, 0),
+                evt(1, "BINANCE", 0, 1),
+                evt(0, "OKX", 1, 0),
+            ],
+        )
+        .await
+        .predicate
+        .to_string();
+
+        assert_eq!(predicate.matches("exchange = ").count(), 2, "{predicate}");
+        assert_eq!(predicate.matches("trade_ts >= ").count(), 2, "{predicate}");
+        assert_eq!(predicate.matches("trade_ts <= ").count(), 2, "{predicate}");
+        assert!(
+            predicate.contains("BINANCE") && predicate.contains("OKX"),
+            "{predicate}"
+        );
+    }
+
+    /// The point of the pruning expression: with 4 committed files, a probe opens the one
+    /// file its `(exchange, day, trade_ts)` range can possibly match — partition pruning
+    /// for the other exchange/day, and per-file `trade_ts` min/max pruning for the two
+    /// files that share the `BINANCE/2026-08-07` partition. And the row it does open still
+    /// has to be found there, or pruning would be silently wrong.
+    #[tokio::test]
+    async fn probe_opens_only_the_files_it_could_match() {
+        let catalog = memory_catalog().await;
+        let mut writer = memory_sink(catalog.clone()).await;
+
+        // Two snapshots, the second one extending the SAME partition with a disjoint
+        // trade_ts range.
+        writer
+            .write_batch(&[
+                evt(0, "BINANCE", 0, 0),
+                evt(1, "BINANCE", 0, 1),
+                evt(0, "OKX", 0, 0),
+                evt(0, "BINANCE", 1, 0),
+            ])
+            .await
+            .unwrap();
+        writer
+            .write_batch(&[evt(50, "BINANCE", 0, 50), evt(51, "BINANCE", 0, 51)])
+            .await
+            .unwrap();
+
+        // A second sink == a freshly started batcher: its probe view of the table now
+        // includes the 4 committed files.
+        let sink = memory_sink(catalog).await;
+        let all = files_of(sink.table(), None).await;
+        assert_eq!(
+            all.len(),
+            4,
+            "one file per written partition, plus the extension"
+        );
+
+        // Duplicate of a committed row: exactly the file holding it survives pruning, and
+        // the anti-join finds the match there.
+        let dup = probe_files(&sink, &[evt(0, "BINANCE", 0, 0)]).await;
+        assert_eq!(
+            dup.len(),
+            1,
+            "1 of 4 files probed, not a full scan: {all:?}"
+        );
+        assert!(
+            dup[0].contains("exchange=BINANCE") && dup[0].contains(DAY_0_DIR),
+            "{dup:?}"
+        );
+        assert_eq!(
+            surviving_rows(&sink, &[evt(0, "BINANCE", 0, 0)]).await,
+            Vec::<u64>::new(),
+            "the pruned file set still contains the duplicate"
+        );
+
+        // Same exchange and day, but a timestamp only the *second* BINANCE/07 file can
+        // contain: per-file min/max pruning, one file opened, and nothing matches it.
+        let far = probe_files(&sink, &[evt(99, "BINANCE", 0, 51)]).await;
+        assert_eq!(
+            far.len(),
+            1,
+            "the other BINANCE/{DAY_0_DIR} file is range-pruned"
+        );
+        assert_ne!(
+            far[0], dup[0],
+            "a different single file than the duplicate probe"
+        );
+        assert_eq!(
+            surviving_rows(&sink, &[evt(99, "BINANCE", 0, 51)]).await,
+            vec![99]
+        );
+
+        // Same exchange, other day: the day transform alone picks the file, and the
+        // duplicate living there is still found.
+        let other_day = probe_files(&sink, &[evt(0, "BINANCE", 1, 0)]).await;
+        assert_eq!(other_day.len(), 1, "day partition pruning");
+        assert!(other_day[0].contains(DAY_1_DIR), "{other_day:?}");
+        assert_eq!(
+            surviving_rows(&sink, &[evt(0, "BINANCE", 1, 0)]).await,
+            Vec::<u64>::new(),
+            "cross-day duplicate still matched, pruning did not hide it"
+        );
+
+        // A partition that does not exist at all: zero files opened, row kept.
+        let none = probe_files(&sink, &[evt(7, "OKX", 1, 5)]).await;
+        assert!(
+            none.is_empty(),
+            "unwritten partition opens no file: {none:?}"
+        );
+        assert_eq!(surviving_rows(&sink, &[evt(7, "OKX", 1, 5)]).await, vec![7]);
+    }
+
+    /// Both behaviours the dedup probe has to get right, measured on the same three
+    /// redelivered trades:
+    ///
+    /// 1. **selective** — it opens only the files the incoming `(exchange, day, trade_ts)`
+    ///    ranges can match, and
+    /// 2. **complete** — within what it opens, it still matches every duplicate.
+    ///
+    /// Which files those are depends on the snapshot the probe reads, and `icetbl` is
+    /// registered once in [`IcebergSink::with_catalog`] with a static provider that
+    /// `commit`/`reload` never refresh. So behaviour 2 holds for a (re)started batcher and
+    /// not for the process that wrote the rows a micro-batch earlier — the redelivered
+    /// rows of an already-committed micro-batch are written again. This last assertion is
+    /// red until `icetbl` is re-registered from `self.table` in `commit`/`reload` (or the
+    /// catalog-backed `IcebergTableProvider` is registered instead, which additionally sees
+    /// other batcher replicas).
+    #[tokio::test]
+    async fn redelivered_rows_are_dropped_from_the_files_the_probe_can_see() {
+        let catalog = memory_catalog().await;
+        let mut batcher = memory_sink(catalog.clone()).await;
+
+        batcher
+            .write_batch(&[
+                evt(0, "BINANCE", 0, 0),
+                evt(1, "BINANCE", 0, 1),
+                evt(0, "OKX", 0, 0),
+            ])
+            .await
+            .unwrap();
+        batcher
+            .write_batch(&[evt(2, "BINANCE", 0, 40), evt(0, "BINANCE", 1, 0)])
+            .await
+            .unwrap();
+        let committed = files_of(batcher.table(), None).await;
+        assert_eq!(committed.len(), 4, "one file per touched partition");
+
+        // Two of these share one partition (BINANCE/07), so the probe's range for that
+        // group spans both of its files.
+        let redelivered = [
+            evt(0, "BINANCE", 0, 0),
+            evt(2, "BINANCE", 0, 40),
+            evt(0, "BINANCE", 1, 0),
+        ];
+
+        // ---- behaviour 1 + 2, on a batcher that starts now --------------------------
+        let restarted = memory_sink(catalog).await;
+        let view = probe_view(&restarted, &redelivered).await;
+        assert_eq!(view.visible_files().await.len(), 4);
+
+        let opened = view.opened_files().await;
+        assert_eq!(
+            opened.len(),
+            3,
+            "selective: the OKX file is pruned, the three BINANCE ones are not: {committed:?}"
+        );
+        assert!(
+            opened.iter().all(|path| path.contains("exchange=BINANCE")),
+            "{opened:?}"
+        );
+        assert_eq!(
+            surviving_rows(&restarted, &redelivered).await,
+            Vec::<u64>::new(),
+            "complete: pruning down to 3 of 4 files still matches every redelivered trade"
+        );
+
+        // ---- the same rows, one micro-batch later, in the process that wrote them ---
+        let view = probe_view(&batcher, &redelivered).await;
+        let visible = view.visible_files().await;
+        let opened = view.opened_files().await;
+        let kept = surviving_rows(&batcher, &redelivered).await;
+        assert!(
+            kept.is_empty(),
+            "complete: the running batcher sees {} of the {} committed files, opened {} of \
+             those and kept {kept:?} of 3 redelivered trades",
+            visible.len(),
+            committed.len(),
+            opened.len(),
+        );
     }
 }
