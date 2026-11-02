@@ -1,0 +1,52 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: batcher-config
+data:
+  # --- source: NATS JetStream (same stream the collector writes to) -----------------
+  NATS_URL: "nats://nats-cluster.nats.svc.cluster.local:4222"
+  TRADES_STREAM: "tradesstream"
+  TRADES_SUBJECT_FILTER: "exchange.*"
+  # The durable consumer IS the pipeline offset; it is created if missing and its
+  # ack_wait / max_ack_pending are reconciled to the values below on every start.
+  BATCHER_CONSUMER: "iceberg-batcher"
+  BATCHER_FETCH_BATCH: "2000"
+  BATCHER_FETCH_EXPIRES_SECS: "2"
+  # Must stay well above BATCH_FLUSH_INTERVAL_SECS, otherwise JetStream redelivers rows the
+  # batcher is still holding and commits them twice on purpose. effective_ack_wait()
+  # (source.rs) enforces floor = flush_interval * 4 + 10s and only warns when it has to
+  # raise this, so keep it set explicitly instead of relying on the clamp.
+  # Cost of a larger value: rows buffered-but-unacked at crash time are only redelivered
+  # once ack_wait elapses, so a pod dying mid-batch delays that data by up to ~1 h.
+  BATCHER_ACK_WAIT_SECS: "3900"
+
+  # --- destination: Lakekeeper / Garage ---------------------------------------------
+  LAKEKEEPER_URI: "http://lakekeeper.lakekeeper.svc.cluster.local:8181/catalog"
+  LAKEKEEPER_WAREHOUSE: "crypto_lakehouse"
+  ICEBERG_NAMESPACE: "trades"
+  # New table on purpose: `trades.trades` belongs to the old RisingWave writer and
+  # `trades.trades_2` to Arroyo. Point this at whichever name should replace them.
+  ICEBERG_TABLE: "trades_rust"
+  GARAGE_ENDPOINT: "http://garage-svc.garage.svc.cluster.local:3900"
+  GARAGE_REGION: "eu-lambronx-1"
+  GARAGE_PATH_STYLE: "true"
+  ICEBERG_TARGET_FILE_SIZE: "134217728" # 128 MiB
+  ICEBERG_PARQUET_COMPRESSION: "zstd"
+  COMMIT_RETRIES: "5"
+
+  # --- micro-batching policy ---------------------------------------------------------
+  # A full batch is whichever of these three fires first. At the live rate (~30 rows/s, so
+  # ~30 k rows per 15 min) the interval decides; the size limits take over during a
+  # redelivery drain/backfill, which is what they are sized for.
+  BATCH_MAX_RECORDS: "50000"
+  BATCH_MAX_BYTES: "67108864" # 64 MiB
+  # 15 min, not 15 s: freshness of ~15 min is acceptable and it cuts commits from
+  # ~5 760/day to ~96/day (~6 k -> ~30 k rows each), which is where the small-file and
+  # commit-latency pressure came from. The count/byte limits above still win under load,
+  # so this only sets the idle-time latency floor.
+  BATCH_FLUSH_INTERVAL_SECS: "900"
+  # Drop (exchange, symbol, trade_id) repeats inside one micro-batch. Cross-batch dedup
+  # stays with the Spark maintenance job, as it was under Arroyo.
+  BATCH_DEDUP: "true"
+
+  RUST_LOG: "info,iceberg=warn,iceberg_storage_opendal=warn,async_nats=warn,hyper=warn,reqwest=warn"
