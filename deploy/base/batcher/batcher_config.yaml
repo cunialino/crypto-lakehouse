@@ -24,9 +24,9 @@ data:
   LAKEKEEPER_URI: "http://lakekeeper.lakekeeper.svc.cluster.local:8181/catalog"
   LAKEKEEPER_WAREHOUSE: "crypto_lakehouse"
   ICEBERG_NAMESPACE: "trades"
-  # The prod table: the batcher's own scratch table was renamed to `trades` and the table
-  # Arroyo left behind moved aside as `trades_legacy`. `crypto-backfill` is what copies the
-  # legacy rows over — see deploy/docs/rust-batcher-guide.md for the current cutover state.
+  # The prod table: the batcher's own scratch table was renamed to `trades`, and the history
+  # the old pipeline had written was copied in by `crypto-backfill` before the table holding it
+  # (`trades_legacy`) was dropped — see deploy/docs/rust-batcher-guide.md for the cutover.
   ICEBERG_TABLE: "trades"
   GARAGE_ENDPOINT: "http://garage-svc.garage.svc.cluster.local:3900"
   GARAGE_REGION: "eu-lambronx-1"

@@ -1,8 +1,11 @@
-//! Append the rows one `trades` table is missing, taken from a sibling table.
+//! Append the rows one `trades` table is missing, taken from a sibling table that has them:
+//! an older table kept for the purpose, a restored snapshot, a re-ingested export. Replaying
+//! the source stream is not an option once the gap is older than `tradesstream`'s 72 h
+//! retention, so the rows are copied across instead.
 //!
-//! Use case: `trades.trades` is missing a stretch of days (a contiguous `trade_id` range
-//! that only the pre-cutover `trades.trades_legacy` has). Replaying the source stream for it
-//! is not possible any more (72 h JetStream retention), so copy the rows across instead.
+//! This is how 2026-06-24 → 2026-10-07 got into `trades.trades`, from the pre-cutover table
+//! then named `trades.trades_legacy` — which is dropped, so read the cutover notes in
+//! `deploy/docs/rust-batcher-guide.md` before looking for it.
 //!
 //! The anti-join is what makes this safe to run more than once: rows the target already
 //! has are never appended again, so a retried or overlapping run cannot create duplicates —
@@ -11,11 +14,11 @@
 //!
 //! ```text
 //! # audit only (read-only, the default): what would be appended?
-//! crypto-backfill --from trades.trades_legacy --into trades.trades \
+//! crypto-backfill --from <source> --into trades.trades \
 //!     '2026-10-06 19:00:00' '2026-10-06 20:00:00'
 //!
 //! # commit it, one snapshot per million rows
-//! crypto-backfill --from trades.trades_legacy --into trades.trades \
+//! crypto-backfill --from <source> --into trades.trades \
 //!     '2026-10-06 19:00:00' '2026-10-06 20:00:00' --execute --chunk-rows 1000000
 //! ```
 //!
@@ -48,8 +51,9 @@ use crypto_iceberg_query::{
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
 struct Args {
-    /// Table to copy from, as `<namespace>.<table>`.
-    #[arg(long, default_value = "trades.trades")]
+    /// Table to copy from, as `<namespace>.<table>`. Required: the only table a caller is
+    /// certain to name is the destination, and reading from it would be a no-op at best.
+    #[arg(long)]
     from: String,
     /// Table to append to, as `<namespace>.<table>`.
     #[arg(long)]

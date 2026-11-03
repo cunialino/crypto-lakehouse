@@ -159,21 +159,29 @@ that ran in the RisingWave namespace). What replaced them:
    arguments into leading `__common_expr_N` columns, so `Day::transform` was handed a `Utf8`
    column (`Should not call internally for unsupported data type Utf8`) — loud for
    `day(trade_ts)`, silent and wrong for `identity(exchange)` whenever both sources are
-   strings. `--execute` instead streams the candidates through `IcebergSink::append_records`
-   (the batcher's own writer) with each chunk bound to the destination schema, so a mismatch
-   is a refused write instead of a mis-partitioned file. Every chunk is one `fast_append`
-   snapshot, and the run only calls itself good after reading the window back through the
-   destination's partitions — rows filed under a wrong `day` are invisible to a pruned read.
+   strings. `--execute` instead streams the candidates through `crypto_iceberg_query::append`
+   (the batcher's own writer) with each chunk bound to the destination schema, so a mismatch is
+   a refused write instead of a mis-partitioned file. Every chunk is one `fast_append` snapshot,
+   and the run only calls itself good after reading the window back through the destination's
+   partitions — rows filed under a wrong `day` are invisible to a pruned read.
    Result: every legacy key up to 2026-10-17 is in `trades.trades` (`rows_to_append: 0` for
    each window audited afterwards), one row per key. That makes some days *smaller* than
    `trades_legacy`, which is the point: the old table double-wrote whole days — 2026-09-05 and
    2026-09-06 hold exactly twice their distinct keys — and the copy kept one row each.
-4. `trades_legacy` stays until the fossils the test batcher left in `trades.trades`
-   (2026-10-07, 2026-10-12, 2026-10-13) are cleared with `crypto-dedup`, then it is dropped
-   through Lakekeeper.
-   Its files sit under `data/exchange_identity=…/trade_ts_day=…` while the batcher writes
-   `data/exchange=…/trade_ts_day=…`; different directory names are harmless because readers
-   use the partition *spec*, not the paths.
+4. `trades_legacy` is dropped later the same day: `DELETE …/tables/trades_legacy?purging=true`
+   against the REST catalog (HTTP 204; it held ~5.5 GB), after re-auditing the start, middle and
+   end of its range and getting `rows_to_append: 0` each time.
+   Two things to know before dropping a table here. This Lakekeeper keeps no soft-delete
+   bookkeeping — the `tabular` row is simply gone, there is no undrop — so the coverage audit is
+   the only safety net. And with no garbage collector deployed, whether `purging=true` actually
+   reclaimed the objects shows only in Garage's bucket usage, which is not observable from the
+   catalog side; assume the ~5.5 GB may still be sitting there until checked.
+   Nothing unique left with it. What it held beyond `trades.trades` was ~68 M redundant copies
+   (518 603 480 rows over ~450 M distinct keys): the double-written days, which the copy
+   deliberately did not bring across.
+   One incidental fact worth keeping: its files sat under `data/exchange_identity=…/…` while the
+   batcher writes `data/exchange=…/…`. Different directory names are harmless — readers use the
+   partition *spec*, never the paths — which is also what made the rename in step 1 safe.
 
 ### Clearing the batcher's own fossils (open)
 
