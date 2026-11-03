@@ -19,6 +19,9 @@
 //! Reading the whole range twice (sort input + write output) is the real cost, so run it
 //! per day-partition on a schedule, never inline in the writer.
 //!
+//! The rewrite never touches the source: it appends the kept rows somewhere else, and swapping
+//! the two names is a separate, deliberate step.
+//!
 //! ```text
 //! # audit only (read-only, safe next to the live writer)
 //! crypto-dedup --table trades.trades '2026-10-08 00:00:00' '2026-10-09 00:00:00'
@@ -26,17 +29,17 @@
 //! # rewrite into a table with the identical schema/partition spec. Create it first with
 //! # `crypto-batcher --ensure-only` (ICEBERG_TABLE=<target>), which reuses schema.rs.
 //! crypto-dedup --table trades.trades --insert-into trades.trades_dedup \
-//!     '2026-10-01 00:00:00' '2026-10-02 00:00:00'
+//!     '2026-10-01 00:00:00' '2026-10-02 00:00:00' --chunk-rows 1000000
 //! ```
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use datafusion::arrow::array::{Int64Array, UInt64Array};
 use std::fmt::Write as _;
 use std::time::Instant;
 
 use crypto_iceberg_query::{
-    CATALOG, EngineOptions, TRADE_COLUMNS, checked_qualified_name, iceberg_session, peak_rss_mib,
+    CATALOG, EngineOptions, TRADE_COLUMNS, append, checked_qualified_name, count_from,
+    iceberg_session, peak_rss_mib,
 };
 
 #[derive(Parser, Debug)]
@@ -52,6 +55,9 @@ struct Args {
     /// Write the deduplicated rows here instead of only auditing. Must already exist.
     #[arg(long)]
     insert_into: Option<String>,
+    /// Rows per commit, for `--insert-into`. Each chunk is one `fast_append` snapshot.
+    #[arg(long, default_value_t = 1_000_000)]
+    chunk_rows: usize,
     /// DataFusion pool cap in MiB. Accounting limit, not an RSS limit.
     #[arg(long, default_value_t = 2048)]
     memory_mb: usize,
@@ -88,23 +94,22 @@ fn ranked_cte(source: &str, start: &str, end: &str) -> String {
     sql
 }
 
-/// Read a single-row count out of a result batch.
+/// The audit: how many rows are in range, and how many of them are redundant.
+fn audit_sql(ctes: &str) -> String {
+    format!(
+        "{ctes} SELECT count(*) AS rows_in_range, \
+                count(*) FILTER (WHERE rn > 1) AS duplicate_rows \
+         FROM ranked"
+    )
+}
+
+/// The rewrite: one row per key, in table column order, ready to stream.
 ///
-/// DataFusion spells counts `UInt64` for a plain `count(*)` but `Int64` once the
-/// aggregate goes through other paths, so accept both instead of guessing per release.
-fn count_from(batch: &datafusion::arrow::record_batch::RecordBatch, column: &str) -> Result<u64> {
-    let array = batch
-        .column_by_name(column)
-        .with_context(|| format!("no `{column}` in result"))?;
-    if let Some(counts) = array.as_any().downcast_ref::<UInt64Array>() {
-        anyhow::ensure!(counts.len() == 1, "`{column}`: expected one row");
-        return Ok(counts.value(0));
-    }
-    if let Some(counts) = array.as_any().downcast_ref::<Int64Array>() {
-        anyhow::ensure!(counts.len() == 1, "`{column}`: expected one row");
-        return Ok(counts.value(0).max(0) as u64);
-    }
-    anyhow::bail!("`{column}` is {:?}, expected a count", array.data_type());
+/// A plain `SELECT` rather than an `INSERT`: DataFusion 53.1 cannot plan `WITH … INSERT INTO …`
+/// (`Query INSERT INTO … not implemented yet`), and the write belongs in the batcher's sink
+/// anyway — see [`append`].
+fn rewrite_sql(ctes: &str) -> String {
+    format!("{ctes} SELECT {TRADE_COLUMNS} FROM ranked WHERE rn = 1")
 }
 
 #[tokio::main]
@@ -131,33 +136,19 @@ async fn main() -> Result<()> {
         args.memory_mb, args.temp_dir, args.start, args.end
     );
 
-    let sql = match &target {
-        None => format!(
-            "{} SELECT count(*) AS rows_in_range, \
-                    count(*) FILTER (WHERE rn > 1) AS duplicate_rows \
-             FROM ranked",
-            ranked_cte(&format!("{CATALOG}.{table}"), &args.start, &args.end)
-        ),
-        Some(into) => format!(
-            "{} INSERT INTO {CATALOG}.{into} SELECT {TRADE_COLUMNS} FROM ranked WHERE rn = 1",
-            ranked_cte(&format!("{CATALOG}.{table}"), &args.start, &args.end)
-        ),
-    };
-
-    let df = ctx.sql(&sql).await.context("failed to plan dedup query")?;
-
-    if args.explain {
-        let explain = df.clone().explain(false, true)?;
-        explain.show().await.context("failed to show plan")?;
-        return Ok(());
-    }
-
+    let ctes = ranked_cte(&format!("{CATALOG}.{table}"), &args.start, &args.end);
     let start = Instant::now();
-    let batches = df.collect().await.context("failed to run dedup query")?;
-    let elapsed = start.elapsed();
 
     match &target {
         None => {
+            let df = ctx
+                .sql(&audit_sql(&ctes))
+                .await
+                .context("failed to plan dedup audit")?;
+            if args.explain {
+                return show_plan(df).await;
+            }
+            let batches = df.collect().await.context("failed to run dedup audit")?;
             let batch = batches.first().context("dedup audit returned no rows")?;
             let total = count_from(batch, "rows_in_range")?;
             let duplicates = count_from(batch, "duplicate_rows")?;
@@ -170,24 +161,49 @@ async fn main() -> Result<()> {
             println!("duplicate rows: {duplicates} ({pct:.4}%)");
         }
         Some(into) => {
-            let written = batches
-                .iter()
-                .map(|batch| count_from(batch, "Rows Executed").unwrap_or(0))
-                .sum::<u64>();
-            println!("rewrote {written} rows into {CATALOG}.{into}");
+            let sql = rewrite_sql(&ctes);
+            if args.explain {
+                let df = ctx
+                    .sql(&sql)
+                    .await
+                    .context("failed to plan dedup rewrite")?;
+                return show_plan(df).await;
+            }
+            let mut sink = append::open(into).await?;
+            let written = append::stream_into(&ctx, &mut sink, &sql, args.chunk_rows).await?;
+            println!("rewrote {written} deduplicated rows into {CATALOG}.{into}");
+            let visible = append::ensure_visible(
+                &ctx,
+                &format!("{CATALOG}.{into}"),
+                &args.start,
+                &args.end,
+                written,
+            )
+            .await?;
+            println!("visible       : {visible} rows readable in the range");
             println!("note: the source is untouched; swapping is a separate, manual step");
         }
     }
 
-    println!("elapsed   : {elapsed:?}");
+    println!("elapsed   : {:?}", start.elapsed());
     println!("peak rss  : {} MiB", peak_rss_mib());
     Ok(())
 }
 
+/// `--explain`: check pruning, and that the sort the window operator needs is really there.
+async fn show_plan(df: datafusion::dataframe::DataFrame) -> Result<()> {
+    df.clone()
+        .explain(false, true)?
+        .show()
+        .await
+        .context("failed to show plan")
+}
+
 #[cfg(test)]
 mod tests {
-    use super::count_from;
     use super::ranked_cte;
+    use super::rewrite_sql;
+    use crypto_iceberg_query::count_from;
     use datafusion::arrow::array::{
         BooleanArray, Float64Array, Int64Array, StringArray, TimestampMicrosecondArray,
     };
@@ -318,6 +334,61 @@ mod tests {
             1,
             "expected exactly the redelivered row to be redundant"
         );
+    }
+
+    /// The rewrite is what `append::stream_into` commits, so its output has to match the
+    /// destination schema exactly — same columns, same order, same types, none nullable. Taken
+    /// from the batcher rather than restated here, so a change in `schema.rs` fails this too.
+    #[tokio::test]
+    async fn rewrite_output_matches_the_destination_schema() {
+        let ctx = ctx_with(
+            &[
+                (100, "BINANCE", "BTCUSDT", 60),
+                (100, "BINANCE", "BTCUSDT", 300),
+                (101, "BINANCE", "BTCUSDT", 360),
+            ],
+            false,
+        );
+        let batch = ctx
+            .sql(&rewrite_sql(&ranked_cte("trades", DAY0.0, DAY0.1)))
+            .await
+            .unwrap()
+            .collect()
+            .await
+            .unwrap()
+            .remove(0);
+        assert_eq!(batch.num_rows(), 1, "the duplicate survived the rewrite");
+
+        let target =
+            crypto_batcher::schema::arrow_schema(&crypto_batcher::schema::table_schema().unwrap())
+                .unwrap();
+        let got = batch.schema();
+        assert_eq!(
+            got.fields()
+                .iter()
+                .map(|f| f.name().as_str())
+                .collect::<Vec<_>>(),
+            target
+                .fields()
+                .iter()
+                .map(|f| f.name().as_str())
+                .collect::<Vec<_>>(),
+            "the sink binds by position, so the projection order must be the table's"
+        );
+        for (want, have) in target.fields().iter().zip(got.fields()) {
+            assert_eq!(
+                have.data_type(),
+                want.data_type(),
+                "`{}`: wrong type — `Utf8View` and a missing `+00:00` are the usual drifts",
+                want.name()
+            );
+            assert_eq!(
+                have.is_nullable(),
+                want.is_nullable(),
+                "`{}`: wrong nullability",
+                want.name()
+            );
+        }
     }
 
     /// The rewrite projection: one row per key, the earliest `event_ts` kept, column list

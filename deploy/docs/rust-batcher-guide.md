@@ -175,6 +175,30 @@ that ran in the RisingWave namespace). What replaced them:
    `data/exchange=…/trade_ts_day=…`; different directory names are harmless because readers
    use the partition *spec*, not the paths.
 
+### Clearing the batcher's own fossils (open)
+
+`trades.trades` still holds 19 984 duplicate rows: 2026-10-07 (653), 2026-10-12 (2 845) and
+2026-10-13 (16 486), all of them inside one hour each. They predate the pre-commit anti-join,
+and they are exact copies — the distinct *rows* of the affected window equal its distinct keys —
+so a replay, not conflicting data. Nothing new accumulates. Clearing them is a rewrite rather
+than an update, so it ends in a name swap:
+
+```text
+# 1. destination with the same schema and partition spec (no NATS needed)
+ICEBERG_TABLE=trades_repaired crypto-batcher --ensure-only
+
+# 2. copy, one row per (exchange, symbol, trade_id), day by day; the source is untouched
+crypto-dedup --table trades.trades --insert-into trades.trades_repaired <start> <end>
+
+# 3. scale the batcher down, dedup the tail, rename `trades` -> `trades_with_dupes` and
+#    `trades_repaired` -> `trades`, scale back up. Same consumer, so the replay of
+#    `tradesstream` is absorbed by the anti-join exactly as in the cutover above.
+```
+
+Verified on 2026-11-03 against a scratch target: the 2026-10-13 19:00 hour (147 595 rows,
+16 486 redundant) rewrote to 131 109 rows, re-audited at 0 duplicates, readable through pruned
+filters on both `exchange` and `trade_ts`.
+
 ### Storage & catalog facts
 
 * Bucket `lakehouse` in Garage. One S3 key is shared by the Lakekeeper storage profile,
