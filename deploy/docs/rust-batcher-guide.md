@@ -150,16 +150,27 @@ that ran in the RisingWave namespace). What replaced them:
    consumer `iceberg-batcher`, so it replays `tradesstream`'s 72 h retention; the cross-batch
    dedup anti-join turns the already-present part of that replay into a no-op.
 3. `crypto-backfill --from trades.trades_legacy --into trades.trades <start> <end> --execute`
-   is meant to copy the history the batcher never saw. It anti-joins on
-   `(exchange, symbol, trade_id)`, so a re-run or an overlapping window cannot duplicate rows,
-   and it normalises the legacy nullable / tz-less columns on the way in.
-   **Not run yet — `--execute` still fails.** Auditing works (`2026-09-01`: 6 137 096 candidate
-   rows, 0 duplicates, 1.5 GiB peak RSS), but the append dies inside `iceberg-datafusion` 0.10:
-   `Day::transform` receives a `Utf8` column (`Should not call internally for unsupported data
-   type Utf8`) even though the input schema validated with `Timestamp(µs, "+00:00")` at that
-   position. So `trades.trades` covers 2026-10-05 onwards and `trades_legacy` 2026-06-24 →
-   2026-10-16; reading both is the only way to see the whole history.
-4. `trades_legacy` stays until the row counts line up, then it is dropped through Lakekeeper.
+   copies the history the batcher never saw; run 2026-11-03 in weekly windows over
+   2026-06-24 → 2026-10-07. It anti-joins on `(exchange, symbol, trade_id)`, so a re-run or an
+   overlapping window cannot duplicate rows, and it normalises the legacy nullable columns on
+   the way in.
+   The append is deliberately not a SQL `INSERT`: `iceberg-datafusion` 0.10 resolves a
+   partition's source columns *by position*, while DataFusion hoists repeated projection
+   arguments into leading `__common_expr_N` columns, so `Day::transform` was handed a `Utf8`
+   column (`Should not call internally for unsupported data type Utf8`) — loud for
+   `day(trade_ts)`, silent and wrong for `identity(exchange)` whenever both sources are
+   strings. `--execute` instead streams the candidates through `IcebergSink::append_records`
+   (the batcher's own writer) with each chunk bound to the destination schema, so a mismatch
+   is a refused write instead of a mis-partitioned file. Every chunk is one `fast_append`
+   snapshot, and the run only calls itself good after reading the window back through the
+   destination's partitions — rows filed under a wrong `day` are invisible to a pruned read.
+   Result: every legacy key up to 2026-10-17 is in `trades.trades` (`rows_to_append: 0` for
+   each window audited afterwards), one row per key. That makes some days *smaller* than
+   `trades_legacy`, which is the point: the old table double-wrote whole days — 2026-09-05 and
+   2026-09-06 hold exactly twice their distinct keys — and the copy kept one row each.
+4. `trades_legacy` stays until the fossils the test batcher left in `trades.trades`
+   (2026-10-07, 2026-10-12, 2026-10-13) are cleared with `crypto-dedup`, then it is dropped
+   through Lakekeeper.
    Its files sit under `data/exchange_identity=…/trade_ts_day=…` while the batcher writes
    `data/exchange=…/trade_ts_day=…`; different directory names are harmless because readers
    use the partition *spec*, not the paths.
