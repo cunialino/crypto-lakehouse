@@ -76,6 +76,18 @@ pub struct ProbeStats {
     pub data_files: usize,
 }
 
+/// What one [`IcebergSink::append_records`] produced. Separate from [`WriteStats`] because
+/// this path has no dedup probe: the caller's own query decides which rows the table lacks.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct AppendStats {
+    pub rows: usize,
+    pub files: usize,
+    pub partitions: usize,
+    pub bytes: u64,
+    pub write_elapsed: Duration,
+    pub commit_elapsed: Duration,
+}
+
 pub struct IcebergSink {
     catalog: Arc<dyn Catalog>,
     ident: TableIdent,
@@ -355,30 +367,87 @@ impl IcebergSink {
         })
     }
 
+    /// The arrow schema [`Self::append_records`] accepts: the table's own schema, with the
+    /// `PARQUET_FIELD_ID` metadata iceberg's writer matches on.
+    pub fn arrow_schema(&self) -> Result<Arc<arrow_schema::Schema>> {
+        schema::arrow_schema(self.table.metadata().current_schema())
+    }
+
+    /// Writes rows that are already arrow batches in the destination schema and commits them
+    /// as one snapshot.
+    ///
+    /// This is how historical rows get in (`crypto-backfill`) rather than a SQL `INSERT`:
+    /// `iceberg-datafusion` resolves a table's partition source columns by *position*, while
+    /// DataFusion's common-subexpression pass can hand the sink a reordered projection, which
+    /// files rows under partition values taken from another column. Binding the batch to the
+    /// table schema here makes that a refused write instead of silent mis-partitioning.
+    ///
+    /// No dedup probe: the caller's query decides what the table lacks, and backfill
+    /// anti-joins on `(exchange, symbol, trade_id)`.
+    pub async fn append_records(&mut self, batch: RecordBatch) -> Result<AppendStats> {
+        if batch.num_rows() == 0 {
+            return Ok(AppendStats::default());
+        }
+        let rows = batch.num_rows();
+        let batch = RecordBatch::try_new(self.arrow_schema()?, batch.columns().to_vec())
+            .context("input batch does not match the destination schema")?;
+
+        let write_start = Instant::now();
+        let data_files = self.write_records(&batch).await?;
+        let write_elapsed = write_start.elapsed();
+
+        let files = data_files.len();
+        let partitions = data_files
+            .iter()
+            .map(|f| f.partition().clone())
+            .collect::<std::collections::HashSet<_>>()
+            .len();
+        let bytes = data_files.iter().map(|f| f.file_size_in_bytes()).sum();
+
+        let commit_start = Instant::now();
+        self.commit(data_files).await?;
+        let commit_elapsed = commit_start.elapsed();
+
+        Ok(AppendStats {
+            rows,
+            files,
+            partitions,
+            bytes,
+            write_elapsed,
+            commit_elapsed,
+        })
+    }
+
     async fn write_files(
         &self,
         rows: &[TradeEvent],
     ) -> Result<(Vec<iceberg::spec::DataFile>, ProbeStats)> {
-        let metadata = self.table.metadata();
-        let iceberg_schema = metadata.current_schema().clone();
-        let arrow_schema = schema::arrow_schema(&iceberg_schema)?;
-        let partition_spec = metadata.default_partition_spec().clone();
-
+        let arrow_schema = self.arrow_schema()?;
         let batch = schema::to_record_batch(&arrow_schema, rows)?;
         let (remaining, probe) = self.deduped_batch(&batch, &arrow_schema).await?;
         let deduped = concat_batches(&arrow_schema, &remaining)?;
+        Ok((self.write_records(&deduped).await?, probe))
+    }
+
+    /// Writes one batch out as one parquet file per `(exchange, day)` partition. Nothing is
+    /// committed, so a failure here leaves only orphaned objects behind.
+    async fn write_records(&self, batch: &RecordBatch) -> Result<Vec<iceberg::spec::DataFile>> {
+        let metadata = self.table.metadata();
+        let iceberg_schema = metadata.current_schema().clone();
+        let partition_spec = metadata.default_partition_spec().clone();
+
         let splitter = iceberg::arrow::RecordBatchPartitionSplitter::try_new_with_computed_values(
             iceberg_schema.clone(),
-            partition_spec.clone(),
+            partition_spec,
         )
         .context("failed to build partition splitter")?;
         let partitions = splitter
-            .split(&deduped)
-            .context("failed to split micro-batch by partition")?;
+            .split(batch)
+            .context("failed to split rows by partition")?;
 
         let parquet_builder = ParquetWriterBuilder::new(
             writer_properties(&self.cfg.parquet_compression),
-            iceberg_schema.clone(),
+            iceberg_schema,
         );
         let rolling = RollingFileWriterBuilder::new(
             parquet_builder,
@@ -396,13 +465,10 @@ impl IcebergSink {
                 .await
                 .context("failed to write partition rows")?;
         }
-        Ok((
-            writer
-                .close()
-                .await
-                .context("failed to close parquet writer")?,
-            probe,
-        ))
+        writer
+            .close()
+            .await
+            .context("failed to close parquet writer")
     }
 
     async fn commit(&mut self, data_files: Vec<iceberg::spec::DataFile>) -> Result<()> {

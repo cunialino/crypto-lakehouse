@@ -57,6 +57,34 @@ pub struct IcebergConfig {
     pub commit_retries: u32,
 }
 
+impl IcebergConfig {
+    /// Builds the catalog/S3 half of the config from the environment. Also what the tools
+    /// that only touch the table (`--ensure-only`, `crypto-backfill`) need.
+    pub fn from_env() -> Result<Self> {
+        Ok(Self {
+            uri: string(
+                "LAKEKEEPER_URI",
+                "http://lakekeeper-lakekeeper.default.svc.cluster.local:8181/catalog",
+            ),
+            warehouse: string("LAKEKEEPER_WAREHOUSE", "crypto_lakehouse"),
+            credential: optional("LAKEKEEPER_CREDENTIAL"),
+            namespace: string("ICEBERG_NAMESPACE", "trades"),
+            table: string("ICEBERG_TABLE", "trades"),
+            s3_endpoint: string(
+                "GARAGE_ENDPOINT",
+                "http://garage-svc.garage.svc.cluster.local:3900",
+            ),
+            s3_region: string("GARAGE_REGION", "eu-lambronx-1"),
+            s3_access_key_id: required("GARAGE_ACCESS_KEY")?,
+            s3_secret_access_key: required("GARAGE_SECRET_KEY")?,
+            s3_path_style: bool_env("GARAGE_PATH_STYLE", true),
+            parquet_compression: string("ICEBERG_PARQUET_COMPRESSION", "zstd"),
+            target_file_size: bytes_env("ICEBERG_TARGET_FILE_SIZE", 128 * 1024 * 1024),
+            commit_retries: u32_env("COMMIT_RETRIES", 5),
+        })
+    }
+}
+
 /// The micro-batching policy itself.
 #[derive(Debug, Clone)]
 pub struct BatchConfig {
@@ -94,27 +122,7 @@ impl Config {
                 fetch_batch: usize_env("BATCHER_FETCH_BATCH", 2_000),
                 fetch_expires: seconds("BATCHER_FETCH_EXPIRES_SECS", 2.),
             },
-            iceberg: IcebergConfig {
-                uri: string(
-                    "LAKEKEEPER_URI",
-                    "http://lakekeeper-lakekeeper.default.svc.cluster.local:8181/catalog",
-                ),
-                warehouse: string("LAKEKEEPER_WAREHOUSE", "crypto_lakehouse"),
-                credential: optional("LAKEKEEPER_CREDENTIAL"),
-                namespace: string("ICEBERG_NAMESPACE", "trades"),
-                table: string("ICEBERG_TABLE", "trades"),
-                s3_endpoint: string(
-                    "GARAGE_ENDPOINT",
-                    "http://garage-svc.garage.svc.cluster.local:3900",
-                ),
-                s3_region: string("GARAGE_REGION", "eu-lambronx-1"),
-                s3_access_key_id: required("GARAGE_ACCESS_KEY")?,
-                s3_secret_access_key: required("GARAGE_SECRET_KEY")?,
-                s3_path_style: bool_env("GARAGE_PATH_STYLE", true),
-                parquet_compression: string("ICEBERG_PARQUET_COMPRESSION", "zstd"),
-                target_file_size: bytes_env("ICEBERG_TARGET_FILE_SIZE", 128 * 1024 * 1024),
-                commit_retries: u32_env("COMMIT_RETRIES", 5),
-            },
+            iceberg: IcebergConfig::from_env()?,
             batch: BatchConfig {
                 max_records: usize_env("BATCH_MAX_RECORDS", 50_000),
                 max_bytes: bytes_env("BATCH_MAX_BYTES", 32 * 1024 * 1024),

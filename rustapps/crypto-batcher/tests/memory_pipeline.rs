@@ -13,7 +13,11 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use arrow_array::{Array, Int64Array, RecordBatch, StringArray, TimestampMicrosecondArray};
+use arrow_array::{
+    Array, BooleanArray, Float64Array, Int32Array, Int64Array, RecordBatch, StringArray,
+    TimestampMicrosecondArray,
+};
+use arrow_schema::{Field, Schema as ArrowSchema};
 use futures::TryStreamExt;
 use iceberg::CatalogBuilder;
 use iceberg::memory::{MEMORY_CATALOG_WAREHOUSE, MemoryCatalogBuilder};
@@ -398,4 +402,102 @@ async fn many_rows_survive_a_multi_file_micro_batch() {
     assert_eq!(ids.first().copied(), Some(0));
     assert_eq!(ids.last().copied(), Some(1_999));
     assert_eq!(ids.len(), 2_000);
+}
+
+/// One batch in the destination's own arrow schema, i.e. what `crypto-backfill` hands over
+/// after normalising historical rows.
+fn prepared_rows(schema: &Arc<ArrowSchema>, rows: &[(&str, &str)]) -> RecordBatch {
+    let n = rows.len();
+    let ts = TimestampMicrosecondArray::from(vec![BASE_MS as i64; n]).with_timezone("+00:00");
+    RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(Int64Array::from(vec![1i64; n])),
+            Arc::new(StringArray::from(
+                rows.iter().map(|(_, s)| *s).collect::<Vec<_>>(),
+            )),
+            Arc::new(StringArray::from(
+                rows.iter().map(|(e, _)| *e).collect::<Vec<_>>(),
+            )),
+            Arc::new(Int64Array::from((11i64..).take(n).collect::<Vec<_>>())),
+            Arc::new(Float64Array::from(vec![1.5f64; n])),
+            Arc::new(Float64Array::from(vec![0.5f64; n])),
+            Arc::new(Int64Array::from(vec![1i64; n])),
+            Arc::new(BooleanArray::from(vec![true; n])),
+            Arc::new(BooleanArray::from(vec![true; n])),
+            Arc::new(ts.clone()),
+            Arc::new(ts),
+        ],
+    )
+    .expect("prepared batch matches the destination schema")
+}
+
+/// `crypto-backfill` copies historical rows in as prepared arrow batches instead of a SQL
+/// `INSERT`: same table, same partition spec, and no dedup probe, because its anti-join
+/// already excluded the keys the table holds.
+#[tokio::test(flavor = "multi_thread")]
+async fn append_records_commits_prepared_rows_into_partitions() {
+    let (catalog, mut sink) = memory_sink().await;
+    let schema = sink.arrow_schema().expect("destination arrow schema");
+
+    let stats = sink
+        .append_records(prepared_rows(
+            &schema,
+            &[
+                ("BINANCE", "BTCUSDT"),
+                ("BINANCE", "BTCUSDT"),
+                ("OKX", "ETHUSDT"),
+            ],
+        ))
+        .await
+        .expect("append commits");
+    assert_eq!(stats.rows, 3);
+    assert_eq!(stats.partitions, 2, "identity(exchange) => BINANCE and OKX");
+    assert_eq!(stats.files, 2, "one file per partition");
+
+    let table = catalog.load_table(&table_ident()).await.unwrap();
+    assert_eq!(
+        table.metadata().snapshots().count(),
+        1,
+        "one append is one snapshot"
+    );
+
+    let rows = scan_all(&table).await;
+    let mut ids = i64_column(&rows, "trade_id");
+    ids.sort_unstable();
+    assert_eq!(ids, vec![11, 12, 13]);
+    let mut symbols = string_column(&rows, "symbol");
+    symbols.sort();
+    symbols.dedup();
+    assert_eq!(symbols, vec!["BTCUSDT", "ETHUSDT"]);
+}
+
+/// The batch is written straight to parquet, so a column layout that merely *looks* right
+/// must be refused rather than filed under the wrong partition values.
+#[tokio::test(flavor = "multi_thread")]
+async fn append_records_refuses_a_foreign_batch_schema() {
+    let (_catalog, mut sink) = memory_sink().await;
+    let schema = sink.arrow_schema().expect("destination arrow schema");
+
+    let batch = prepared_rows(&schema, &[("BINANCE", "BTCUSDT")]);
+    let mut columns: Vec<_> = batch.columns().to_vec();
+    columns[3] = Arc::new(Int32Array::from(vec![11]));
+    let int32_trade_id = Field::new("trade_id", arrow_schema::DataType::Int32, false);
+    let fields: Vec<Field> = schema
+        .fields()
+        .iter()
+        .map(|f| (**f).clone())
+        .enumerate()
+        .map(|(i, f)| if i == 3 { int32_trade_id.clone() } else { f })
+        .collect();
+    let foreign = Arc::new(ArrowSchema::new(fields));
+
+    let err = sink
+        .append_records(RecordBatch::try_new(foreign, columns).unwrap())
+        .await
+        .expect_err("a foreign column type must not be committed");
+    assert!(
+        err.to_string().contains("destination schema"),
+        "unexpected error: {err}"
+    );
 }
