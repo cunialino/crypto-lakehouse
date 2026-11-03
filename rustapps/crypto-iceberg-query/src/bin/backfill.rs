@@ -29,28 +29,20 @@
 //! A candidate with a NULL in a column the target requires is skipped rather than defaulted;
 //! `rows_skipped_null` reports how many, and `--execute` appends exactly `rows_to_append`.
 //!
-//! `--execute` writes with `IcebergSink::append_records` — the batcher's own writer — rather
-//! than a SQL `INSERT`. `iceberg-datafusion` resolves a table's partition source columns *by
-//! position*, while DataFusion hoists repeated projection arguments into leading
-//! `__common_expr_N` columns: the partition transform then reads whichever column happens to
-//! sit at that index — loudly for `day(trade_ts)`, silently for `identity(exchange)` whenever
-//! both are strings. Binding a batch to the destination schema makes a mismatch a refused
-//! write instead. `projection_matches_the_target_contract` pins the projection to
-//! `TRADE_COLUMNS`.
+//! `--execute` appends through `crypto_iceberg_query::append` — the batcher's writer, with the
+//! output bound to the destination schema — rather than a SQL `INSERT`, which mis-partitions
+//! rows there; that module explains why. `projection_matches_the_target_contract` pins this
+//! tool's projection to what the destination expects.
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use datafusion::arrow::array::{Int64Array, UInt64Array};
-use datafusion::arrow::compute::concat_batches;
 use datafusion::arrow::record_batch::RecordBatch;
-use futures::StreamExt;
 use std::fmt::Write as _;
 use std::time::Instant;
 
-use crypto_batcher::config::IcebergConfig;
-use crypto_batcher::sink::IcebergSink;
 use crypto_iceberg_query::{
-    CATALOG, EngineOptions, checked_qualified_name, iceberg_session, peak_rss_mib,
+    CATALOG, EngineOptions, append, checked_qualified_name, count_from, iceberg_session,
+    peak_rss_mib,
 };
 
 #[derive(Parser, Debug)]
@@ -233,22 +225,6 @@ fn candidate_sql(ctes: &str) -> String {
     format!("{ctes} SELECT {CANDIDATE_PROJECTION} FROM missing")
 }
 
-/// Reads the named column as a count, accepting either spelling DataFusion uses.
-fn count_from(batch: &RecordBatch, column: &str) -> Result<u64> {
-    let array = batch
-        .column_by_name(column)
-        .with_context(|| format!("no `{column}` in result"))?;
-    if let Some(counts) = array.as_any().downcast_ref::<UInt64Array>() {
-        anyhow::ensure!(counts.len() == 1, "`{column}`: expected one row");
-        return Ok(counts.value(0));
-    }
-    if let Some(counts) = array.as_any().downcast_ref::<Int64Array>() {
-        anyhow::ensure!(counts.len() == 1, "`{column}`: expected one row");
-        return Ok(counts.value(0).max(0) as u64);
-    }
-    anyhow::bail!("`{column}` is {:?}, expected a count", array.data_type());
-}
-
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
@@ -289,11 +265,13 @@ async fn main() -> Result<()> {
             return run(&ctx, &candidate_sql(&ctes), true, |_| Ok(())).await;
         }
         let start = Instant::now();
-        let mut sink = destination_sink(&into).await?;
+        let mut sink = append::open(&into).await?;
         let appended =
-            append_candidates(&ctx, &mut sink, &candidate_sql(&ctes), args.chunk_rows).await?;
+            append::stream_into(&ctx, &mut sink, &candidate_sql(&ctes), args.chunk_rows).await?;
         println!("appended  : {appended} rows to {target}");
-        verify_window(&ctx, &target, &args.start, &args.end, appended).await?;
+        let visible =
+            append::ensure_visible(&ctx, &target, &args.start, &args.end, appended).await?;
+        println!("visible   : {visible} rows readable in the window");
         println!("elapsed   : {:?}", start.elapsed());
         println!("peak rss  : {} MiB", peak_rss_mib());
         return Ok(());
@@ -314,116 +292,6 @@ async fn main() -> Result<()> {
         Ok(())
     })
     .await
-}
-
-/// Opens `--into` with the batcher's writer config, so history is appended by the same code
-/// that writes the live rows.
-async fn destination_sink(into: &str) -> Result<IcebergSink> {
-    let (namespace, table) = into
-        .split_once('.')
-        .context("--into must be `<namespace>.<table>`")?;
-    let mut cfg = IcebergConfig::from_env().context("invalid iceberg configuration")?;
-    cfg.namespace = namespace.to_string();
-    cfg.table = table.to_string();
-    IcebergSink::connect(cfg)
-        .await
-        .context("failed to open the destination table")
-}
-
-/// Streams the candidates and commits them `chunk_rows` at a time. A chunk that fails costs
-/// its own files as orphans, never the chunks already committed, and the anti-join in
-/// [`candidate_ctes`] makes the retry see them as present.
-async fn append_candidates(
-    ctx: &datafusion::prelude::SessionContext,
-    sink: &mut IcebergSink,
-    sql: &str,
-    chunk_rows: usize,
-) -> Result<u64> {
-    let schema = sink.arrow_schema()?;
-    let mut stream = ctx
-        .sql(sql)
-        .await
-        .context("failed to plan candidate query")?
-        .execute_stream()
-        .await
-        .context("failed to start candidate query")?;
-
-    let mut buffer: Vec<RecordBatch> = Vec::new();
-    let mut buffered = 0usize;
-    let mut chunks = 0u64;
-    let mut appended = 0u64;
-
-    while let Some(batch) = stream.next().await {
-        let batch = batch.context("candidate query failed")?;
-        buffer.push(
-            RecordBatch::try_new(schema.clone(), batch.columns().to_vec())
-                .context("candidate projection does not match the destination schema")?,
-        );
-        buffered += batch.num_rows();
-        if buffered >= chunk_rows {
-            appended += flush(sink, &mut buffer, &mut chunks).await?;
-            buffered = 0;
-        }
-    }
-    if buffered > 0 {
-        appended += flush(sink, &mut buffer, &mut chunks).await?;
-    }
-    Ok(appended)
-}
-
-/// Commits what is buffered as one snapshot.
-async fn flush(
-    sink: &mut IcebergSink,
-    buffer: &mut Vec<RecordBatch>,
-    chunks: &mut u64,
-) -> Result<u64> {
-    let batch = concat_batches(&buffer[0].schema(), &buffer[..])?;
-    buffer.clear();
-    let stats = sink.append_records(batch).await?;
-    *chunks += 1;
-    println!(
-        "  chunk {chunks}: {} rows, {} files, {} partitions, {} MiB (write {:?}, commit {:?})",
-        stats.rows,
-        stats.files,
-        stats.partitions,
-        stats.bytes / (1024 * 1024),
-        stats.write_elapsed,
-        stats.commit_elapsed,
-    );
-    Ok(stats.rows as u64)
-}
-
-/// Reads the window back through the destination's own partitions. Rows filed under wrong
-/// `day(trade_ts)` values are invisible to a time-pruned read, which is what makes this worth
-/// the pass over trusting the writer.
-async fn verify_window(
-    ctx: &datafusion::prelude::SessionContext,
-    target: &str,
-    start: &str,
-    end: &str,
-    appended: u64,
-) -> Result<()> {
-    let batches = ctx
-        .sql(&format!(
-            "SELECT count(*) AS visible FROM {target} \
-             WHERE trade_ts >= TIMESTAMP '{start}' AND trade_ts < TIMESTAMP '{end}'"
-        ))
-        .await?
-        .collect()
-        .await
-        .context("failed to read the window back")?;
-    let visible = count_from(
-        batches.first().context("verification returned no rows")?,
-        "visible",
-    )?;
-    println!("visible   : {visible} rows readable in the window");
-    anyhow::ensure!(
-        visible >= appended,
-        "only {visible} of {appended} appended rows are readable in the window, so some are \
-         filed under partition values a time-pruned read cannot find — audit the table before \
-         trusting it"
-    );
-    Ok(())
 }
 
 async fn run<F>(
@@ -778,15 +646,15 @@ mod tests {
         for field in schema.fields() {
             assert!(
                 !field.is_nullable(),
-                "`{}` is nullable but the target requires every column; iceberg-datafusion \
-                 compares the insert input schema against the table schema",
+                "`{}` is nullable but the destination requires every column, and \
+                 `append::stream_into` refuses a batch that is not its schema",
                 field.name()
             );
         }
 
-        // Type equality is part of the same contract, and it is checked in two places: the
-        // insert compares it per column, while the partition struct build fails later and
-        // only for `exchange`/`trade_ts`. `Utf8View` is what DataFusion likes to produce.
+        // Type equality is part of the same contract, and refusing the write beats writing
+        // files the partition transforms later misread. `Utf8View` is what DataFusion likes to
+        // produce.
         let target_types = [
             ("event_time", DataType::Int64),
             ("symbol", DataType::Utf8),

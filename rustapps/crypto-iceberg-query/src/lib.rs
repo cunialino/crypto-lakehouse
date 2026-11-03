@@ -1,6 +1,6 @@
 //! Shared Lakekeeper + DataFusion plumbing for the Iceberg tools in this crate:
-//! `crypto-iceberg-query` (per-day row counts) and `crypto-dedup` (duplicate audit /
-//! rewrite).
+//! `crypto-iceberg-query` (per-day row counts), `crypto-dedup` (duplicate audit / rewrite) and
+//! `crypto-backfill` (copy a missing range in from a sibling table).
 //!
 //! Configuration comes from the environment, using the same variable names as
 //! `crypto-batcher`, so a CronJob pod can reuse `batcher-config` +
@@ -10,7 +10,11 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+pub mod append;
+
 use anyhow::{Context, Result};
+use datafusion::arrow::array::{Int64Array, UInt64Array};
+use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::execution::SessionStateBuilder;
 use datafusion::execution::disk_manager::{DiskManagerBuilder, DiskManagerMode};
 use datafusion::execution::runtime_env::RuntimeEnvBuilder;
@@ -31,11 +35,31 @@ pub const CATALOG: &str = "lk";
 
 /// The 11 data columns of the `trades` contract, in table order.
 ///
-/// Kept here rather than derived at runtime so an `INSERT INTO` cannot silently write
-/// columns in the wrong order — see `crypto_batcher::schema` for the field ids.
+/// Written out rather than derived at runtime so a query's projection cannot silently reorder
+/// them — `append::stream_into` binds the output to the table schema, and `TRADE_COLUMNS` is
+/// the spelling both sides agree on. See `crypto_batcher::schema` for the field ids.
 pub const TRADE_COLUMNS: &str = "event_time, symbol, exchange, trade_id, price, quantity, \
                                   trade_time, is_buyer_maker, is_best_price_match, trade_ts, \
                                   event_ts";
+
+/// Read a single-row count out of a result batch.
+///
+/// DataFusion spells counts `UInt64` for a plain `count(*)` but `Int64` once the aggregate goes
+/// through other paths, so accept both instead of guessing per release.
+pub fn count_from(batch: &RecordBatch, column: &str) -> Result<u64> {
+    let array = batch
+        .column_by_name(column)
+        .with_context(|| format!("no `{column}` in result"))?;
+    if let Some(counts) = array.as_any().downcast_ref::<UInt64Array>() {
+        anyhow::ensure!(counts.len() == 1, "`{column}`: expected one row");
+        return Ok(counts.value(0));
+    }
+    if let Some(counts) = array.as_any().downcast_ref::<Int64Array>() {
+        anyhow::ensure!(counts.len() == 1, "`{column}`: expected one row");
+        return Ok(counts.value(0).max(0) as u64);
+    }
+    anyhow::bail!("`{column}` is {:?}, expected a count", array.data_type());
+}
 
 /// Memory / spill knobs for the bounded session.
 #[derive(Debug, Clone)]
