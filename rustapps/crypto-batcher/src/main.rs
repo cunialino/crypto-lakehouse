@@ -14,7 +14,7 @@ use tokio::sync::watch;
 use tracing_subscriber::EnvFilter;
 
 use crypto_batcher::batcher;
-use crypto_batcher::config::Config;
+use crypto_batcher::config::{Config, IcebergConfig};
 use crypto_batcher::sink::IcebergSink;
 use crypto_batcher::source;
 
@@ -38,6 +38,21 @@ async fn main() -> Result<()> {
     let args = Args::parse();
     init_tracing(&args.log_level);
 
+    // Provisioning the destination needs the catalog and the object store, and nothing else:
+    // `crypto-dedup --insert-into` runs this to create its swap target and has no reason to
+    // know a message bus exists.
+    if args.ensure_only {
+        let iceberg = IcebergConfig::from_env().context("invalid iceberg configuration")?;
+        let sink = IcebergSink::connect(iceberg.clone()).await?;
+        println!(
+            "table {}.{} ready at {}",
+            iceberg.namespace,
+            iceberg.table,
+            sink.table().metadata().location()
+        );
+        return Ok(());
+    }
+
     let cfg = Config::from_env().context("invalid configuration")?;
     tracing::info!(
         table = format!("{}.{}", cfg.iceberg.namespace, cfg.iceberg.table),
@@ -51,15 +66,6 @@ async fn main() -> Result<()> {
     );
 
     let mut sink = IcebergSink::connect(cfg.iceberg.clone()).await?;
-    if args.ensure_only {
-        println!(
-            "table {}.{} ready at {}",
-            cfg.iceberg.namespace,
-            cfg.iceberg.table,
-            sink.table().metadata().location()
-        );
-        return Ok(());
-    }
 
     let trades = source::spawn_nats_source(&cfg.nats, &cfg.batch)
         .await
