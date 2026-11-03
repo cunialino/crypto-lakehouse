@@ -1,0 +1,9 @@
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: HelmRepository
+metadata:
+  name: lakekeeper
+  namespace: lakekeeper
+spec:
+  interval: 1h
+  timeout: 3m
+  url: https://lakekeeper.github.io/lakekeeper-charts

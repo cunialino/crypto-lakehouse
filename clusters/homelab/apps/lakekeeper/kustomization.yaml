@@ -1,0 +1,16 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# No namespace transformer: the plain manifests here already state their namespace, and the
+# HelmRelease carries it for the chart.
+#
+# The database role Secret for the CNPG side (cnpg-system/lakekeeper-secret) is NOT here: the
+# operator that consumes it lives in homelab, so homelab's infrastructure/configs/postgres owns it.
+# Both halves read the same Bitwarden item, so a password rotation has to edit both files.
+resources:
+  - namespace.yaml
+  - repository.yaml
+  - helmrelease.yaml
+  - secret-app.yaml
+  - secret-pg-encryption-key.yaml
+  - ingress.yaml
+  - maintenance.yaml
