@@ -1,0 +1,13 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# The collector is plain manifests, no chart: one Deployment plus the two JetStream streams it feeds.
+# A namespace transformer is safe here - everything this layer owns is namespaced into
+# crypto-collector, so the manifests themselves stay namespace-free.
+#
+# The Streams hold buffered messages and nack refuses some field changes in place, so treat their
+# subjects, maxAge and replicas as API changes rather than edits.
+namespace: crypto-collector
+resources:
+  - namespace.yaml
+  - collector.yaml
+  - streams.yaml
