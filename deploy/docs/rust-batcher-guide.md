@@ -1,9 +1,8 @@
-# crypto-batcher: NATS → Iceberg micro-batching in Rust (replaces the Arroyo pipeline)
+# crypto-batcher: NATS → Iceberg micro-batching in Rust
 
-`rustapps/crypto-batcher` is a single binary that does what the Arroyo `arroyo-lakehouse`
-pipeline did — read trade events off NATS JetStream and write them into the Lakekeeper-
-managed Iceberg table — without a stream processor, a checkpoint store, or a compiled
-artifact pipeline.
+`rustapps/crypto-batcher` is the single writer of `trades.trades`: it reads trade events off
+NATS JetStream and writes them into the Lakekeeper-managed Iceberg table without a stream
+processor, a checkpoint store, or a compiled artifact pipeline.
 
 ```text
 NATS JetStream tradesstream (exchange.*)
@@ -34,7 +33,7 @@ Module map (`rustapps/crypto-batcher/src/`):
   loses no data and needs no checkpoint replay: un-acked messages come back after
   `ack_wait`. This is the property that lets the whole Arroyo job/state disappear.
 * **One micro-batch = one snapshot.** Commits are atomic and visible immediately; there is
-  no "files opened but never rolled" failure mode (see the Arroyo guide §5a).
+  no "files opened but never rolled" failure mode.
 * **Flush policy is size- AND age-bounded**, whichever of `BATCH_MAX_RECORDS`,
   `BATCH_MAX_BYTES`, `BATCH_FLUSH_INTERVAL_SECS` fires first, so a quiet stream still
   commits within `flush_interval` and a busy one stays under the memory bound.
@@ -74,7 +73,7 @@ Module map (`rustapps/crypto-batcher/src/`):
 | `LAKEKEEPER_URI` | in-cluster lakekeeper | REST catalog uri |
 | `LAKEKEEPER_WAREHOUSE` | `crypto_lakehouse` | warehouse name |
 | `LAKEKEEPER_CREDENTIAL` | unset | `client_id:secret` for catalog OAuth2 |
-| `ICEBERG_NAMESPACE` / `ICEBERG_TABLE` | `trades` / `trades_rust` | destination table (created if missing) |
+| `ICEBERG_NAMESPACE` / `ICEBERG_TABLE` | `trades` / `trades` | destination table (created if missing) |
 | `GARAGE_ENDPOINT` / `GARAGE_REGION` | in-cluster garage / `eu-lambronx-1` | S3 endpoint + region |
 | `GARAGE_ACCESS_KEY` / `GARAGE_SECRET_KEY` | — (required) | S3 key, never logged |
 | `GARAGE_PATH_STYLE` | `true` | path-style addressing |
@@ -103,9 +102,15 @@ partitioned by: identity(exchange), day(trade_ts)   → data/exchange=X/trade_ts
 ```
 
 Field ids 1…11 are fixed in `schema.rs` — never renumber them.
-`trade_ts`/`event_ts` are **milliseconds × 1000** (the Arroyo guide's `1970-01-21`
-partition trap): if you ever see a `trade_ts_day=1970-01-21` partition, that conversion
-broke again.
+`trade_ts`/`event_ts` are **milliseconds × 1000**: treat millisecond input as microseconds
+and every row lands in `trade_ts_day=1970-01-21`, which is how this pipeline failed once
+before.
+
+The pre-cutover `trades` table carried the same eleven columns but every one *nullable* and
+`trade_ts`/`event_ts` typed `timestamp` **without** timezone, partitioned by fields named
+`exchange_identity`/`trade_ts_day`. Arrow refuses that mix (`Timestamp(µs)` vs
+`Timestamp(µs, "+00:00")`) and Iceberg cannot convert the type in place, which is why the
+cutover moved tables aside instead of writing into the old one.
 
 ## Deploy
 
@@ -118,7 +123,9 @@ deploy/base/batcher/garage_s3_secret.yaml   ExternalSecret → GARAGE_ACCESS_KEY
 ```
 
 Image: `nix build .#dockerBatcher` (pushed as `192.168.0.2:5000/crypto-batcher` by the
-`ARC Crypto Builder` workflow on `v*` tags, next to `crypto-collector`).
+`ARC Crypto Builder` workflow on `v*` tags, next to `crypto-collector`). The deployment uses
+`:latest` with `imagePullPolicy: Always`, so a rollout re-pulls whatever the registry holds;
+pin a tag in `batcher.yaml` when you want a reproducible one.
 
 Notes:
 
@@ -129,18 +136,55 @@ Notes:
 * The sink creates the namespace/table on first run with the schema and partition spec
   above; nothing else has to be pre-created.
 
-## Cutover from Arroyo (not executed)
+## Cutover (2026-11-03)
 
-Nothing was removed from the live Arroyo deployment. To cut over:
+The Arroyo and RisingWave deployments are deleted (ArgoCD applications `arroyo` and
+`risingwave`, together with `deploy/base/arroyo`, `deploy/base/risingwave` and the dbt job
+that ran in the RisingWave namespace). What replaced them:
 
-1. Deploy the batcher (it writes `trades.trades_rust` by default; set `ICEBERG_TABLE` to
-   whatever should replace `trades_2`).
-2. Let it drain `tradesstream` (72 h retention) — `nats con info -s … tradesstream
-   iceberg-batcher` shows `Unprocessed Messages: 0` when caught up.
-3. Compare against Arroyo's table with the Spark dedup/count queries
-   (`deploy/scripts/table_maintenance.py`, or `crypto-iceberg-query`).
-4. Only then stop the Arroyo pipelines and drop their tables; the `trade_gaps` pipeline is
-   **not** ported (see gaps below), so keep Arroyo for that or port the tumble/lead query.
+1. Lakekeeper renames — metadata only, no objects copied: `trades.trades` →
+   `trades.trades_legacy`, then `trades.trades_rust_test` → `trades.trades`. The prod name
+   therefore keeps the rows the batcher had already written *and* stays the name every reader
+   defaults to (`MAINT_TARGET_TABLE=lk.trades.trades`, `crypto-dedup --table trades.trades`).
+2. `deploy/base/batcher` deployed with `ICEBERG_TABLE=trades` and a **fresh** durable
+   consumer `iceberg-batcher`, so it replays `tradesstream`'s 72 h retention; the cross-batch
+   dedup anti-join turns the already-present part of that replay into a no-op.
+3. `crypto-backfill --from trades.trades_legacy --into trades.trades <start> <end> --execute`
+   is meant to copy the history the batcher never saw. It anti-joins on
+   `(exchange, symbol, trade_id)`, so a re-run or an overlapping window cannot duplicate rows,
+   and it normalises the legacy nullable / tz-less columns on the way in.
+   **Not run yet — `--execute` still fails.** Auditing works (`2026-09-01`: 6 137 096 candidate
+   rows, 0 duplicates, 1.5 GiB peak RSS), but the append dies inside `iceberg-datafusion` 0.10:
+   `Day::transform` receives a `Utf8` column (`Should not call internally for unsupported data
+   type Utf8`) even though the input schema validated with `Timestamp(µs, "+00:00")` at that
+   position. So `trades.trades` covers 2026-10-05 onwards and `trades_legacy` 2026-06-24 →
+   2026-10-16; reading both is the only way to see the whole history.
+4. `trades_legacy` stays until the row counts line up, then it is dropped through Lakekeeper.
+   Its files sit under `data/exchange_identity=…/trade_ts_day=…` while the batcher writes
+   `data/exchange=…/trade_ts_day=…`; different directory names are harmless because readers
+   use the partition *spec*, not the paths.
+
+### Storage & catalog facts
+
+* Bucket `lakehouse` in Garage. One S3 key is shared by the Lakekeeper storage profile,
+  `garage-s3-credentials` (batcher), `lakekeeper-secret` (Spark maintenance) and
+  `garage-secret` (ns `garage`).
+* The storage profile has **remote signing** enabled and STS disabled: Lakekeeper signs S3
+  requests on the client's behalf, so the key a client presents is a bootstrap rather than
+  the authority. From off-cluster: port-forward `svc/lakekeeper` (8181) and point
+  `GARAGE_ENDPOINT` at the Garage LB (`192.168.0.200:3900`), which is what
+  `deploy/scripts/table_maintenance.py` documents.
+* **Never read a row count out of a snapshot summary.** iceberg-rust writes the manifest and
+  only then builds the summary from an already-drained list, so `total-records` /
+  `total-data-files` can read `0` on a table holding hundreds of millions of rows, and
+  `expire_snapshots` + `rewrite_manifests` make it worse. Trust the manifest avros,
+  `crypto-dedup`/`crypto-backfill`'s audit output, or a real scan (Spark logs
+  `ScanReport{resultDataFiles, totalFileSizeInBytes}`).
+* Lakekeeper mirrors metadata into its own `lakekeeper` DB (`tabular`, `table_snapshot_log`,
+  `table_default_partition_spec`), which is the quick way to ask "does this table exist, when
+  did it last commit, what is its schema". `expire … retain_last 1` trims
+  `table_snapshot_log` to the surviving snapshot, so it cannot say how much data is in the
+  table.
 
 ## Local validation
 
@@ -158,12 +202,9 @@ Validated locally on 2026-10-07:
 * `live_stack_end_to_end` (ignored by default): 3 000 published → 3 000 readable, no
   duplicate trade ids.
 
-## Known gaps vs the Arroyo deployment
+## Known gaps
 
-* **No `trade_gaps` pipeline** (`deploy/base/arroyo/sql/gaps.sql`, NATS `trade.gaps`) —
-  that one is a tumbling-window `lead()` aggregation, not a batch sink.
-* **No Prometheus metrics/Alertmanager rules** (Arroyo had `prometheus_rules.yaml` +
-  `prometheus_podmonitor.yaml`). The batcher logs one structured line per flush
+* **No Prometheus metrics/Alertmanager rules.** The batcher logs one structured line per flush
   (`rows`, `files`, `partitions`, `bytes`, `write_ms`, `commit_ms`, `duplicates_dropped`,
   `ack_failures`, running totals) plus `consumer ready` with `num_pending` /
   `num_ack_pending`; a `/metrics` endpoint would be a small follow-up.

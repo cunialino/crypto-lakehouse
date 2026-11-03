@@ -32,7 +32,7 @@ async fn main() -> Result<()> {
     let warehouse =
         std::env::var("LAKEKEEPER_WAREHOUSE").unwrap_or_else(|_| "crypto_lakehouse".into());
     let namespace = std::env::var("ICEBERG_NAMESPACE").unwrap_or_else(|_| "trades".into());
-    let table_name = std::env::var("ICEBERG_TABLE").unwrap_or_else(|_| "trades_rust".into());
+    let table_name = std::env::var("ICEBERG_TABLE").unwrap_or_else(|_| "trades".into());
 
     let mut props = HashMap::new();
     props.insert(REST_CATALOG_PROP_URI.to_string(), uri.clone());

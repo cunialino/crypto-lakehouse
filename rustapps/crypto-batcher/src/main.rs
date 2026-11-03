@@ -1,7 +1,7 @@
 //! `crypto-batcher` — NATS JetStream → Iceberg micro-batcher.
 //!
-//! Replaces the Arroyo `arroyo-lakehouse` pipeline (`deploy/base/arroyo/sql/lakehouse.sql`)
-//! with a single Rust binary; `lib.rs` describes the pipeline shape.
+//! The only writer of `trades.trades`; it replaced the Arroyo `arroyo-lakehouse` pipeline.
+//! `lib.rs` describes the pipeline shape.
 //!
 //! Run `--ensure-only` to create the destination table and exit (useful as an init
 //! container or a smoke test).

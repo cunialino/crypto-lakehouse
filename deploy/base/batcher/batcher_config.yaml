@@ -24,9 +24,10 @@ data:
   LAKEKEEPER_URI: "http://lakekeeper.lakekeeper.svc.cluster.local:8181/catalog"
   LAKEKEEPER_WAREHOUSE: "crypto_lakehouse"
   ICEBERG_NAMESPACE: "trades"
-  # New table on purpose: `trades.trades` belongs to the old RisingWave writer and
-  # `trades.trades_2` to Arroyo. Point this at whichever name should replace them.
-  ICEBERG_TABLE: "trades_rust"
+  # The prod table: the batcher's own scratch table was renamed to `trades` and the table
+  # Arroyo left behind moved aside as `trades_legacy`. `crypto-backfill` is what copies the
+  # legacy rows over — see deploy/docs/rust-batcher-guide.md for the current cutover state.
+  ICEBERG_TABLE: "trades"
   GARAGE_ENDPOINT: "http://garage-svc.garage.svc.cluster.local:3900"
   GARAGE_REGION: "eu-lambronx-1"
   GARAGE_PATH_STYLE: "true"

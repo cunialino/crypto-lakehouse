@@ -12,7 +12,7 @@ Locally, to compact one table without waiting for 02:00:
     export LAKEKEEPER_URI=http://127.0.0.1:8181
     export GARAGE_ENDPOINT=http://192.168.0.200:3900          # garage-svc LB
     export AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=...     # same key pair
-    export MAINT_TARGET_TABLE=lk.trades.trades_rust_test
+    export MAINT_TARGET_TABLE=lk.trades.trades_legacy
     export MAINT_OPS=compact,manifests
     spark-submit --driver-memory 8g --conf spark.sql.autoBroadcastJoinThreshold=-1 \
         deploy/scripts/table_maintenance.py

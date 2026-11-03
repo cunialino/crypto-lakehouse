@@ -102,7 +102,7 @@ impl Config {
                 warehouse: string("LAKEKEEPER_WAREHOUSE", "crypto_lakehouse"),
                 credential: optional("LAKEKEEPER_CREDENTIAL"),
                 namespace: string("ICEBERG_NAMESPACE", "trades"),
-                table: string("ICEBERG_TABLE", "trades_rust"),
+                table: string("ICEBERG_TABLE", "trades"),
                 s3_endpoint: string(
                     "GARAGE_ENDPOINT",
                     "http://garage-svc.garage.svc.cluster.local:3900",

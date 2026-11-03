@@ -1,10 +1,10 @@
 //! The `trades` Iceberg schema, its partition spec, and the Arrow projection of a
 //! micro-batch.
 //!
-//! The column set is intentionally identical to the retired Arroyo `iceberg_trades_sink`
-//! connection table (`deploy/base/arroyo/tables/iceberg_trades_sink.json`) so that
-//! downstream consumers (Spark maintenance job, `crypto-iceberg-query`, dbt) do not care
-//! which writer produced the data:
+//! The column set is the one `trades.trades` has always had, so downstream consumers
+//! (Spark maintenance job, `crypto-iceberg-query`) do not care which writer produced a
+//! given file. The one deliberate upgrade over the historical table is nullability and
+//! timezone: everything here is `required` and `timestamptz`:
 //!
 //! ```text
 //!  1 event_time          long          (ms since epoch, exchange event time)
@@ -20,7 +20,7 @@
 //! 11 event_ts            timestamptz   (micros, derived from event_time)
 //! ```
 //!
-//! Partitioning mirrors Arroyo too: `identity(exchange)` + `day(trade_ts)`.
+//! Partitioning is `identity(exchange)` + `day(trade_ts)`.
 //!
 //! The proto carries `uint64` millis; Iceberg has no unsigned long and the Arroyo sink
 //! cast them to `bigint`, so the same wrapping `as i64` cast is used here.
@@ -61,9 +61,9 @@ pub const ICEBERG_TZ: &str = "+00:00";
 
 /// Epoch milliseconds -> Iceberg/Arrow epoch microseconds.
 ///
-/// Getting this wrong is the classic failure of this pipeline: `to_timestamp_micros`
-/// on millisecond input parked every Arroyo row in the `1970-01-21` partition (see
-/// `deploy/docs/arroyo-ingestion-guide.md`), so the factor is spelled out once here.
+/// Getting this wrong is the classic failure of this pipeline: treating millisecond
+/// input as microseconds parks every row in the `1970-01-21` partition, so the factor
+/// is spelled out once here.
 pub const MICROS_PER_MILLI: i64 = 1_000;
 
 /// The Iceberg schema of the trades table (schema id 1, matching a freshly created table).
