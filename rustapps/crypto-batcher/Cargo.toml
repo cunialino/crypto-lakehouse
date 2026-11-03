@@ -2,7 +2,7 @@
 name = "crypto-batcher"
 version = "0.1.0"
 edition = "2024"
-description = "Micro-batches NATS JetStream trade events into Iceberg (replaces the Arroyo lakehouse pipeline)"
+description = "Micro-batches NATS JetStream trade events into Iceberg (sole writer of trades.trades)"
 
 [dependencies]
 anyhow = "1.0.102"

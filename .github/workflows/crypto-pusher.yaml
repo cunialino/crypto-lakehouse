@@ -32,7 +32,7 @@ jobs:
           nix run --extra-experimental-features 'nix-command flakes' nixpkgs#skopeo -- copy --insecure-policy --dest-tls-verify=false docker-archive:"$(readlink result)" docker://$BASE:$TAG
           nix run --extra-experimental-features 'nix-command flakes' nixpkgs#skopeo -- copy --insecure-policy --dest-tls-verify=false docker-archive:"$(readlink result)" docker://$BASE:latest
 
-      # The NATS -> Iceberg micro-batcher that replaces the Arroyo lakehouse pipeline
+      # The NATS -> Iceberg micro-batcher, sole writer of trades.trades
       # (deploy/base/batcher consumes this image).
       - name: Build batcher image
         run: git config --global --add safe.directory $(pwd) && nix build --extra-experimental-features 'nix-command flakes' .#dockerBatcher --out-link result-batcher

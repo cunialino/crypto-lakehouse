@@ -72,8 +72,8 @@ spark = (
     #   UnsupportedOperationException: Cannot support vectorized reads for column
     #   [is_buyer_maker] required boolean is_buyer_maker = 8 with encoding RLE
     # so rewrite_data_files dies mid-write on any table the batcher wrote. This is not
-    # specific to compaction: every Spark consumer of Rust-written files (this job, dbt)
-    # needs vectorisation off, which is why it is set here rather than per invocation.
+    # specific to compaction: every Spark consumer of Rust-written files needs
+    # vectorisation off, which is why it is set here rather than per invocation.
     .config("spark.sql.parquet.enableVectorizedReader", "false")
     .config("spark.sql.iceberg.vectorization.enabled", "false")
     # Event Logging
