@@ -1,8 +1,8 @@
 //! Append the rows one `trades` table is missing, taken from a sibling table.
 //!
-//! Use case: the Rust batcher's table lost a stretch of 2026-10-06 (a contiguous
-//! `trade_id` range that only the Arroyo table has). Replaying the source stream for it is
-//! not possible any more (72 h JetStream retention), so copy the rows across instead.
+//! Use case: `trades.trades` is missing a stretch of days (a contiguous `trade_id` range
+//! that only the pre-cutover `trades.trades_legacy` has). Replaying the source stream for it
+//! is not possible any more (72 h JetStream retention), so copy the rows across instead.
 //!
 //! The anti-join is what makes this safe to run more than once: rows the target already
 //! has are never appended again, so a retried or overlapping run cannot create duplicates —
@@ -11,19 +11,25 @@
 //!
 //! ```text
 //! # audit only (read-only, the default): what would be appended?
-//! crypto-backfill --into trades.trades_rust_test \
+//! crypto-backfill --from trades.trades_legacy --into trades.trades \
 //!     '2026-10-06 19:00:00' '2026-10-06 20:00:00'
 //!
 //! # commit it
-//! crypto-backfill --into trades.trades_rust_test \
+//! crypto-backfill --from trades.trades_legacy --into trades.trades \
 //!     '2026-10-06 19:00:00' '2026-10-06 20:00:00' --execute
 //! ```
 //!
-//! Two schema mismatches between the historical Arroyo table and the batcher's are
-//! normalised on the way in rather than copied verbatim — see `CANDIDATE_PROJECTION`.
+//! The schema differences between the pre-cutover table and the batcher's are normalised on
+//! the way in rather than copied verbatim — see `CANDIDATE_PROJECTION`.
 //!
 //! A candidate with a NULL in a column the target requires is skipped rather than defaulted;
 //! `rows_skipped_null` reports how many, and `--execute` appends exactly `rows_to_append`.
+//!
+//! Known blocker: `--execute` does not run against a partitioned target yet. The plan validates
+//! against the table schema, then `iceberg-datafusion` hands the `day` partition transform a
+//! `Utf8` column (`Should not call internally for unsupported data type Utf8`), so today only
+//! the audit path is usable. `projection_matches_the_target_contract` pins the field types that got
+//! us this far — nullable booleans and `Utf8View` strings are rejected there on purpose.
 
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -78,7 +84,7 @@ struct Args {
 /// has to be made here, which is why every entry yields a non-NULL value.
 ///
 /// For the two flags the default *is* the semantics: they are optional in the historical
-/// table only because the Arroyo sink stored proto3's absent `false` as NULL while prost in
+/// table only because the pre-cutover writers stored proto3's absent `false` as NULL while
 /// the batcher stores `false`, so NULL means exactly `false` and coalescing keeps one
 /// encoding instead of mixing two in one table. For the other nine the default is a backstop
 /// that cannot fire, because [`candidate_ctes`] drops every candidate missing a
@@ -90,19 +96,33 @@ struct Args {
 /// cast target type (`ParserError: Expected: ), found: NOT`), and `WHERE col IS NOT NULL`
 /// does not narrow a plan's schema either.
 ///
+/// The flags take a detour through `INT`, and only they do it because only they can carry a
+/// NULL this far: DataFusion 53.1 keeps a coalesced `BOOLEAN` *nullable* in the executed
+/// schema — `coalesce`, `CAST`, `arrow_cast`, `CASE` and `IS NOT DISTINCT FROM` all behave
+/// the same — and `iceberg-datafusion` does check field nullability against the table's. The
+/// numeric hop makes the coalesce stick (`NULL → 0 → false`), and the cast back restores the
+/// column's own type.
+///
+/// The two strings are the one place where a `CAST` is worse than nothing:
+/// `coalesce(CAST(col AS VARCHAR), '')` widens to `Utf8View`, which the insert tolerates but
+/// iceberg-rust then refuses when it builds the `identity(exchange)` partition struct from the
+/// table's own `Utf8` field (`Incorrect datatype for StructArray field "exchange"`). Plain
+/// `coalesce(col, '')` stays `Utf8`. `arrow_cast(…, 'Utf8')` also stays `Utf8` but drops the
+/// field-id metadata, after which `day(trade_ts)` is handed a string column.
+///
 /// `trade_ts`/`event_ts` are Iceberg `timestamp` (no zone) in the historical table and
 /// `timestamptz` in the batcher's. Both hold identical epoch micros, so `arrow_cast`
 /// reinterprets the unit's metadata, not the value: Iceberg spells UTC `+00:00`, and only
 /// `arrow_cast` can ask for it.
 const CANDIDATE_PROJECTION: &str = r#"coalesce(CAST(event_time AS BIGINT), 0) AS event_time,
-    coalesce(CAST(symbol AS VARCHAR), '') AS symbol,
-    coalesce(CAST(exchange AS VARCHAR), '') AS exchange,
+    coalesce(symbol, '') AS symbol,
+    coalesce(exchange, '') AS exchange,
     coalesce(CAST(trade_id AS BIGINT), 0) AS trade_id,
     coalesce(CAST(price AS DOUBLE), 0) AS price,
     coalesce(CAST(quantity AS DOUBLE), 0) AS quantity,
     coalesce(CAST(trade_time AS BIGINT), 0) AS trade_time,
-    coalesce(is_buyer_maker, false) AS is_buyer_maker,
-    coalesce(is_best_price_match, false) AS is_best_price_match,
+    CAST(coalesce(CAST(is_buyer_maker AS INT), 0) AS BOOLEAN) AS is_buyer_maker,
+    CAST(coalesce(CAST(is_best_price_match AS INT), 0) AS BOOLEAN) AS is_best_price_match,
     arrow_cast(coalesce(CAST(trade_ts AS TIMESTAMP(6)), TIMESTAMP '1970-01-01 00:00:00'),
                'Timestamp(Microsecond, Some("+00:00"))') AS trade_ts,
     arrow_cast(coalesce(CAST(event_ts AS TIMESTAMP(6)), TIMESTAMP '1970-01-01 00:00:00'),
@@ -337,8 +357,8 @@ mod tests {
         (day * 86_400 + secs) * 1_000_000
     }
 
-    /// The historical Arroyo spelling: every column optional, `trade_ts`/`event_ts` without
-    /// a zone. `maker` is `None` wherever the flag was proto3-false.
+    /// The pre-cutover spelling: every column optional, `trade_ts`/`event_ts` without a
+    /// zone. `maker` is `None` wherever the flag was proto3-false.
     fn source_schema() -> Arc<Schema> {
         Arc::new(Schema::new(vec![
             Field::new("event_time", DataType::Int64, true),
@@ -641,6 +661,46 @@ mod tests {
 
         assert_no_nulls(&batch);
 
+        let schema = batch.schema();
+        for field in schema.fields() {
+            assert!(
+                !field.is_nullable(),
+                "`{}` is nullable but the target requires every column; iceberg-datafusion \
+                 compares the insert input schema against the table schema",
+                field.name()
+            );
+        }
+
+        // Type equality is part of the same contract, and it is checked in two places: the
+        // insert compares it per column, while the partition struct build fails later and
+        // only for `exchange`/`trade_ts`. `Utf8View` is what DataFusion likes to produce.
+        let target_types = [
+            ("event_time", DataType::Int64),
+            ("symbol", DataType::Utf8),
+            ("exchange", DataType::Utf8),
+            ("trade_id", DataType::Int64),
+            ("price", DataType::Float64),
+            ("quantity", DataType::Float64),
+            ("trade_time", DataType::Int64),
+            ("is_buyer_maker", DataType::Boolean),
+            ("is_best_price_match", DataType::Boolean),
+            (
+                "trade_ts",
+                DataType::Timestamp(TimeUnit::Microsecond, Some(Arc::from("+00:00"))),
+            ),
+            (
+                "event_ts",
+                DataType::Timestamp(TimeUnit::Microsecond, Some(Arc::from("+00:00"))),
+            ),
+        ];
+        for (name, expected) in target_types {
+            assert_eq!(
+                schema.field_with_name(name).unwrap().data_type(),
+                &expected,
+                "`{name}` must arrive as the target's own type",
+            );
+        }
+
         let flag = |name: &str| {
             batch
                 .column_by_name(name)
@@ -721,4 +781,5 @@ mod tests {
         );
         assert!(append.contains("SELECT * FROM missing"));
     }
+
 }

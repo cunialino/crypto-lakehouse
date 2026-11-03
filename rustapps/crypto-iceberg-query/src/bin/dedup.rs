@@ -21,7 +21,7 @@
 //!
 //! ```text
 //! # audit only (read-only, safe next to the live writer)
-//! crypto-dedup --table trades.trades_rust_test '2026-10-08 00:00:00' '2026-10-09 00:00:00'
+//! crypto-dedup --table trades.trades '2026-10-08 00:00:00' '2026-10-09 00:00:00'
 //!
 //! # rewrite into a table with the identical schema/partition spec. Create it first with
 //! # `crypto-batcher --ensure-only` (ICEBERG_TABLE=<target>), which reuses schema.rs.
