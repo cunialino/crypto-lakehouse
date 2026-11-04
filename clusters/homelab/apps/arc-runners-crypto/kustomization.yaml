@@ -1,0 +1,14 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# One HelmRelease: the gha-runner-scale-set that runs this repository's GitHub Actions jobs.
+#
+# Deliberately no Namespace object. arc-runners is created and owned by homelab's arc-runners layer,
+# which also installs the controller this scale set registers with, the arc-runner-auth Secret and the
+# actions-runner-controller-charts HelmRepository the HelmRelease points at. A second Flux owner on
+# that Namespace would fight over it and prune the other's claim.
+#
+# The HelmRelease states its own namespace instead of using a namespace transformer: Renovate's flux
+# manager links a HelmRelease to its HelmRepository only when the namespace is written in the
+# manifest, never from the parent Kustomization.
+resources:
+  - helmrelease.yaml
