@@ -1,0 +1,14 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# The batcher is plain manifests: one Deployment, the ConfigMap that is its whole configuration,
+# and the Garage S3 Secret it reads through envFrom.
+#
+# The Secret was an ExternalSecret with refreshInterval 10s, so a Bitwarden edit reached a fresh pod
+# within seconds. Under SOPS a rotation is a commit plus a Flux sync, and the same Garage key also
+# lives in ../lakekeeper/secret-app.yaml, so both files have to change in one commit.
+namespace: crypto-batcher
+resources:
+  - namespace.yaml
+  - secret-garage-s3-credentials.yaml
+  - batcher_config.yaml
+  - batcher.yaml
