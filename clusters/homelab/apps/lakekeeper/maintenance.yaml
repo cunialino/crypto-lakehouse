@@ -13,7 +13,9 @@ spec:
           restartPolicy: "OnFailure"
           containers:
           - name: spark-maintenance
-            image: custom.io/spark:s0.1.4
+            # The script this runs is baked into the image (flake.nix dockerSpark), so a new script
+            # needs a new tag here plus the matching `s*` tag pushed to trigger the builder workflow.
+            image: custom.io/spark:s0.1.5
             imagePullPolicy: IfNotPresent
             env:
             - name: AWS_ACCESS_KEY_ID

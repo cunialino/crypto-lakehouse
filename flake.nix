@@ -194,7 +194,10 @@
 
         packages.dockerSpark = pkgs.dockerTools.buildImage {
           name = "spark";
-          tag = "s0.1.4";
+          # Bump together with the CronJob image in clusters/homelab/apps/lakekeeper/maintenance.yaml:
+          # the entrypoint runs /bin/table_maintenance.py baked from deploy/scripts, so reusing a tag
+          # leaves the nodes on the old copy (imagePullPolicy IfNotPresent) and the fix never runs.
+          tag = "s0.1.5";
           copyToRoot = dockerRootfs;
           config = {
             Entrypoint = [
