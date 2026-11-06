@@ -8,7 +8,7 @@ description = "Micro-batches NATS JetStream trade events into Iceberg (sole writ
 anyhow = "1.0.102"
 arrow-array = "58"
 arrow-schema = "58"
-async-nats = "0.49.0"
+async-nats = "0.52.0"
 clap = { version = "4.6.7", features = ["derive"] }
 crypto-data = { version = "0.1.0", path = "../crypto-data" }
 datafusion = "53.1"
