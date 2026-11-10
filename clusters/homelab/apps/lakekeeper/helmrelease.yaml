@@ -5,7 +5,9 @@ metadata:
   namespace: lakekeeper
 spec:
   interval: 1h
-  timeout: 10m
+  # The 0.14 migration rewrites table and view schemas and can run for minutes, and the upgrade now
+  # waits on that Job, so 10m is not enough headroom.
+  timeout: 30m
   # Argo rendered this chart under the Application name, and every object name in the chart derives
   # from it. Pinning is what makes the first install adopt the live objects instead of creating a
   # parallel lakekeeper-lakekeeper-* set beside them.
@@ -30,6 +32,11 @@ spec:
   # that Secret and secret-pg-encryption-key.yaml in this directory is its only copy in Git. Losing
   # it makes the catalog's already-encrypted columns unreadable.
   values:
+    # The db-migration Job must not be a Helm post-upgrade hook: 0.15 refuses to serve on an
+    # unmigrated database, so the new pod waits for the migration while the post-upgrade hook waits
+    # for the pod, and flux gives up on the stalled Deployment. helmWait renders the Job as a plain
+    # resource applied beside the Deployment, which is where Argo's Sync hook ran it.
+    helmWait: true
     postgresql:
       enabled: false
     secretBackend:
@@ -45,6 +52,10 @@ spec:
       passwordSecret: "lakekeeper-secret"
       passwordSecretKey: "PGPASSWORD"
     catalog:
+      dbMigrations:
+        # the Job is named after the Helm revision, so without a TTL every upgrade leaves another
+        # finished Job behind in the namespace
+        ttlSecondsAfterFinished: 600
       extraEnv:
         - name: AWS_ACCESS_KEY_ID
           valueFrom:
