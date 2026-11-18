@@ -27,7 +27,7 @@ use tokio::sync::watch;
 use crypto_batcher::batcher::{self, Stats};
 use crypto_batcher::config::{BatchConfig, IcebergConfig};
 use crypto_batcher::schema::TradeEvent;
-use crypto_batcher::sink::IcebergSink;
+use crypto_batcher::sink::{IcebergSink, SinkResult};
 use crypto_batcher::source::{self, Ack, Envelope};
 
 const DAY_MS: u64 = 24 * 60 * 60 * 1000;
@@ -94,19 +94,19 @@ fn trade(id: u64, exchange: &str, symbol: &str, day_offset: u64) -> Envelope {
     }
 }
 
-/// Starts the batch loop in the background with an external shutdown handle.
+/// Starts the batch loop in the background with an external shutdown handle. Each test states
+/// for itself whether the loop was supposed to end cleanly.
 fn spawn_batcher(
     mut sink: IcebergSink,
     policy: BatchConfig,
     rx: source::TradeReceiver,
     mut shutdown_rx: watch::Receiver<()>,
-) -> tokio::task::JoinHandle<Stats> {
+) -> tokio::task::JoinHandle<SinkResult<Stats>> {
     tokio::spawn(async move {
         batcher::run(rx, &mut sink, policy, async move {
             let _ = shutdown_rx.changed().await;
         })
         .await
-        .expect("batch loop never errors")
     })
 }
 
@@ -184,7 +184,7 @@ async fn micro_batches_reach_the_table_and_stay_readable() {
 
     tokio::time::sleep(Duration::from_millis(400)).await;
     shutdown_tx.send(()).unwrap();
-    let stats: Stats = handle.await.unwrap();
+    let stats: Stats = handle.await.unwrap().expect("clean run");
 
     assert_eq!(stats.rows, 30, "all rows committed: {stats:?}");
     assert!(
@@ -299,7 +299,7 @@ async fn duplicates_are_dropped_but_still_acked() {
 
     tokio::time::sleep(Duration::from_millis(200)).await;
     shutdown_tx.send(()).unwrap();
-    let stats = handle.await.unwrap();
+    let stats = handle.await.unwrap().expect("clean run");
 
     assert_eq!(stats.rows, 4, "only distinct trades are written");
     assert_eq!(stats.duplicates_dropped, 2);
@@ -333,23 +333,30 @@ async fn failed_commit_leaves_messages_unacked() {
     };
 
     let (tx, rx) = source::trade_channel(64);
-    let (shutdown_tx, shutdown_rx) = watch::channel(());
+    // Kept alive on purpose: dropping the sender would resolve the shutdown future and stop
+    // the loop before the destination is broken. Nothing sends on it — a dropped table is
+    // supposed to stop the loop by itself.
+    let (_shutdown_tx, shutdown_rx) = watch::channel(());
     let handle = spawn_batcher(sink, policy, rx, shutdown_rx);
 
+    // Break the destination before the rows arrive: the five rows then trigger a flush that
+    // is guaranteed to fail, where racing a drop against the age trigger would only usually.
+    catalog.drop_table(&table_ident()).await.unwrap();
     for i in 0..5u64 {
         let mut envelope = trade(i, "BINANCE", "BTCUSDT", 0);
         envelope.ack = Ack::Counter(acked.clone());
         tx.send(envelope).await.unwrap();
     }
 
-    // Break the destination: the commit — and therefore the acks — must fail.
-    catalog.drop_table(&table_ident()).await.unwrap();
-    tokio::time::sleep(Duration::from_millis(500)).await;
-    shutdown_tx.send(()).unwrap();
-
-    let stats = handle.await.unwrap();
-    assert!(stats.failed_commits > 0, "failure recorded: {stats:?}");
-    assert_eq!(stats.rows, 0, "nothing was committed");
+    let err = handle
+        .await
+        .unwrap()
+        .expect_err("a dropped table cannot be committed to");
+    assert!(err.is_missing_table(), "expected a missing table: {err:?}");
+    assert!(
+        !err.is_retryable(),
+        "redelivery cannot recreate the table, so the loop must stop rather than spin: {err:?}"
+    );
     assert_eq!(
         acked.load(Ordering::Relaxed),
         0,
@@ -385,7 +392,7 @@ async fn many_rows_survive_a_multi_file_micro_batch() {
     }
     tokio::time::sleep(Duration::from_millis(600)).await;
     shutdown_tx.send(()).unwrap();
-    let stats = handle.await.unwrap();
+    let stats = handle.await.unwrap().expect("clean run");
 
     assert_eq!(stats.rows, 2_000);
     assert!(

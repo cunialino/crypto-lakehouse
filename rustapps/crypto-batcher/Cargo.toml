@@ -19,6 +19,7 @@ iceberg-datafusion = "0.10.1"
 iceberg-storage-opendal = { version = "0.10.1", features = ["opendal-s3"] }
 parquet = { version = "58", features = ["async", "zstd"] }
 prost = "0.14.1"
+thiserror = "2.0.21"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "sync", "time"] }
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.20", features = ["env-filter"] }

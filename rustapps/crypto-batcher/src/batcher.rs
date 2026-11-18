@@ -12,7 +12,7 @@ use futures::StreamExt;
 
 use crate::config::BatchConfig;
 use crate::schema::TradeEvent;
-use crate::sink::{IcebergSink, WriteStats};
+use crate::sink::{IcebergSink, SinkResult, WriteStats};
 use crate::source::{Ack, Envelope, TradeReceiver};
 
 /// Why a micro-batch was closed.
@@ -180,13 +180,15 @@ pub struct Stats {
 ///
 /// On shutdown the buffered remainder is flushed before returning, so a rolling restart
 /// loses nothing that was already read. A commit failure never acks its batch: the rows
-/// come back through JetStream redelivery (at-least-once).
+/// come back through JetStream redelivery (at-least-once). A retryable failure is logged and
+/// the loop carries on; one that redelivery cannot fix ends it, leaving the process to
+/// restart rather than burn one doomed flush per second while consumer lag grows.
 pub async fn run<F: Future<Output = ()>>(
     mut source: TradeReceiver,
     sink: &mut IcebergSink,
     policy: BatchConfig,
     shutdown: F,
-) -> anyhow::Result<Stats> {
+) -> SinkResult<Stats> {
     let mut acc = Accumulator::new(policy);
     let mut stats = Stats::default();
     tokio::pin!(shutdown);
@@ -207,16 +209,16 @@ pub async fn run<F: Future<Output = ()>>(
                     let trigger = acc
                         .trigger_now(Instant::now())
                         .unwrap_or(FlushTrigger::Bytes);
-                    flush(&mut acc, sink, &mut stats, trigger).await;
+                    flush(&mut acc, sink, &mut stats, trigger).await?;
                 }
             }
             // Channel closed or SIGTERM: commit what is left, then leave.
             Step::Row(None) | Step::Stop => {
-                flush(&mut acc, sink, &mut stats, FlushTrigger::Shutdown).await;
+                flush(&mut acc, sink, &mut stats, FlushTrigger::Shutdown).await?;
                 return Ok(stats);
             }
             Step::Due => {
-                flush(&mut acc, sink, &mut stats, FlushTrigger::Interval).await;
+                flush(&mut acc, sink, &mut stats, FlushTrigger::Interval).await?;
             }
         }
     }
@@ -234,10 +236,10 @@ pub async fn flush(
     sink: &mut IcebergSink,
     stats: &mut Stats,
     trigger: FlushTrigger,
-) -> Option<WriteStats> {
+) -> SinkResult<Option<WriteStats>> {
     let batch = acc.take(trigger);
     if batch.is_empty() {
-        return None;
+        return Ok(None);
     }
 
     stats.duplicates_dropped += batch.duplicates_dropped as u64;
@@ -245,18 +247,29 @@ pub async fn flush(
     let written = match sink.write_batch(&batch.rows).await {
         Ok(written) => written,
         Err(err) => {
+            // No ack on either path: JetStream redelivers after `ack_wait` and the rows are
+            // rewritten into a fresh snapshot. Duplicates are handled downstream, as with Arroyo.
             stats.failed_commits += 1;
-            // No ack here: JetStream redelivers after `ack_wait` and the rows are rewritten
-            // into a fresh snapshot. Duplicates are handled downstream, as with Arroyo.
+            // Waiting helps an outage; it does not help a dropped table or rows the
+            // destination schema will refuse forever.
+            if err.is_retryable() {
+                tracing::error!(
+                    rows = batch.rows.len(),
+                    trigger = ?batch.trigger,
+                    error = ?err,
+                    "micro-batch commit failed; leaving messages unacked for redelivery"
+                );
+                // Throttle the fetch→commit→fail cycle so a catalog/S3 outage is not a hot loop.
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                return Ok(None);
+            }
             tracing::error!(
                 rows = batch.rows.len(),
                 trigger = ?batch.trigger,
                 error = ?err,
-                "micro-batch commit failed; leaving messages unacked for redelivery"
+                "micro-batch cannot be committed; stopping the batcher with its messages unacked"
             );
-            // Throttle the fetch→commit→fail cycle so a catalog/S3 outage is not a hot loop.
-            tokio::time::sleep(Duration::from_secs(1)).await;
-            return None;
+            return Err(err);
         }
     };
 
@@ -294,7 +307,7 @@ pub async fn flush(
         total_probe_files = stats.probe_files_opened,
         "flushed micro-batch to iceberg"
     );
-    Some(written)
+    Ok(Some(written))
 }
 
 #[cfg(test)]

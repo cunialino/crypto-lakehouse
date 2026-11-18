@@ -16,14 +16,13 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result};
 use arrow_array::{Array, RecordBatch, StringArray, TimestampMicrosecondArray};
 use datafusion::arrow::compute::concat_batches;
 use datafusion::catalog::CatalogProvider;
 use datafusion::datasource::TableProvider;
 use datafusion::execution::context::SessionContext;
 use datafusion::logical_expr::Expr;
-use futures::{TryFutureExt, TryStreamExt};
+use futures::TryStreamExt;
 use iceberg::io::{
     S3_ACCESS_KEY_ID, S3_ENDPOINT, S3_PATH_STYLE_ACCESS, S3_REGION, S3_SECRET_ACCESS_KEY,
 };
@@ -51,6 +50,92 @@ use uuid::Uuid;
 
 use crate::config::IcebergConfig;
 use crate::schema::{self, TradeEvent};
+
+/// Why the sink refused to open, write or commit.
+///
+/// The first four are conditions redelivery cannot fix; the two leaf variants keep the
+/// originating error whole, so `error = ?err` in the batch loop still prints iceberg's kind,
+/// context map and backtrace.
+///
+/// `iceberg::Error` is named bare here and nowhere else in the crate, and `ArrowError` has no
+/// bare variant at all: every arrow site means something specific, so each names its own
+/// condition instead of leaving `?` to pick one.
+#[derive(thiserror::Error, Debug)]
+pub enum SinkError {
+    /// Absence. datafusion's catalog API answers `Option` and iceberg's an `ErrorKind`, so
+    /// neither gives up an error that says this on its own.
+    #[error("table {namespace}.{table} not found")]
+    TableNotFound { namespace: String, table: String },
+    #[error("rows refused by the destination schema: {context}")]
+    RowsRefused {
+        context: &'static str,
+        #[source]
+        source: arrow_schema::ArrowError,
+    },
+    #[error("incoming rows have no `{column}` column of type {expected}")]
+    ColumnMismatch {
+        column: &'static str,
+        expected: &'static str,
+    },
+    #[error("the table's `trade_ts` is {found}, which the dedup probe cannot bound")]
+    TimestampUnsupported { found: String },
+    /// The retried metadata commit gave up. It wraps whatever the catalog said rather than
+    /// naming a leaf, which is what keeps it classification-transparent: `is_retryable` and
+    /// `is_missing_table` recurse through `source` instead of treating it as its own kind.
+    #[error(
+        "commit to {ident} refused after {attempts} attempts; {data_files} data files orphaned"
+    )]
+    Commit {
+        ident: String,
+        attempts: u32,
+        data_files: usize,
+        #[source]
+        source: Box<SinkError>,
+    },
+    #[error(transparent)]
+    Iceberg(#[from] iceberg::Error),
+    #[error("datafusion: {0}")]
+    DataFusion(#[from] datafusion::error::DataFusionError),
+}
+
+pub type SinkResult<T> = std::result::Result<T, SinkError>;
+
+impl SinkError {
+    /// `false` means neither redelivery nor waiting can help, so the caller should stop
+    /// instead of spinning on it. Dispatches on the leaf, never on the wrapper.
+    pub fn is_retryable(&self) -> bool {
+        match self {
+            Self::Commit { source, .. } => source.is_retryable(),
+            Self::Iceberg(err) => err.retryable(),
+            // `_` on purpose: DataFusionError is not `#[non_exhaustive]`, so a variant added
+            // upstream has to land in "do not retry" rather than silently in "do".
+            Self::DataFusion(err) => matches!(
+                err,
+                datafusion::error::DataFusionError::ResourcesExhausted(_)
+                    | datafusion::error::DataFusionError::ObjectStore(_)
+                    | datafusion::error::DataFusionError::IoError(_)
+            ),
+            Self::TableNotFound { .. }
+            | Self::RowsRefused { .. }
+            | Self::ColumnMismatch { .. }
+            | Self::TimestampUnsupported { .. } => false,
+        }
+    }
+
+    pub fn is_missing_table(&self) -> bool {
+        match self {
+            Self::Commit { source, .. } => source.is_missing_table(),
+            Self::TableNotFound { .. } => true,
+            Self::Iceberg(err) => matches!(
+                err.kind(),
+                iceberg::ErrorKind::TableNotFound | iceberg::ErrorKind::NamespaceNotFound
+            ),
+            // datafusion 53 spells this only in a string; the one place that knows it.
+            Self::DataFusion(err) => err.to_string().contains("not found"),
+            _ => false,
+        }
+    }
+}
 
 /// What one flush produced; logged and returned to the caller for stats.
 #[derive(Debug, Default, Clone, Copy)]
@@ -99,21 +184,27 @@ pub struct IcebergSink {
     ctx: SessionContext,
 }
 
-fn build_pruning_expr(batch: &RecordBatch, schema: &arrow_schema::Schema) -> Result<Expr> {
+fn build_pruning_expr(batch: &RecordBatch, schema: &arrow_schema::Schema) -> SinkResult<Expr> {
     let ts_dt = schema
         .field_with_name("trade_ts")
-        .context("iceberg schema has no `trade_ts`")?
+        .map_err(|e| SinkError::RowsRefused {
+            context: "the table has no `trade_ts`",
+            source: e,
+        })?
         .data_type()
         .clone();
     let ts = col_as::<TimestampMicrosecondArray>(batch, "trade_ts")?;
-    let ts_lit = |v: i64| -> Result<Expr> {
+    let ts_lit = |v: i64| -> SinkResult<Expr> {
         let sv = match &ts_dt {
             arrow_schema::DataType::Timestamp(arrow_schema::TimeUnit::Microsecond, tz) => {
                 datafusion::scalar::ScalarValue::TimestampMicrosecond(Some(v), tz.clone())
             }
             arrow_schema::DataType::Timestamp(arrow_schema::TimeUnit::Nanosecond, tz) => {
+                // Saturating rather than failing the flush: a probe that reads too many
+                // files still finds every duplicate, one that reads too few loses rows.
+                // Reachable only for timestamps past 2262.
                 datafusion::scalar::ScalarValue::TimestampNanosecond(
-                    Some(v.checked_mul(1_000).context("ns overflow")?),
+                    Some(v.saturating_mul(1_000)),
                     tz.clone(),
                 )
             }
@@ -129,7 +220,11 @@ fn build_pruning_expr(batch: &RecordBatch, schema: &arrow_schema::Schema) -> Res
                     tz.clone(),
                 )
             }
-            other => panic!("iceberg `trade_ts` is {other:?}, expected a timestamp"),
+            other => {
+                return Err(SinkError::TimestampUnsupported {
+                    found: format!("{other:?}"),
+                });
+            }
         };
         Ok(datafusion::logical_expr::lit(sv))
     };
@@ -156,7 +251,7 @@ fn build_pruning_expr(batch: &RecordBatch, schema: &arrow_schema::Schema) -> Res
 
     let pruning = groups
         .iter()
-        .map(|((e, _day), (lo, hi))| -> Result<Expr> {
+        .map(|((e, _day), (lo, hi))| -> SinkResult<Expr> {
             let ll = ts_lit(*lo)?;
             let hh = ts_lit(*hi)?;
             Ok(datafusion::logical_expr::col("exchange")
@@ -174,37 +269,35 @@ fn build_pruning_expr(batch: &RecordBatch, schema: &arrow_schema::Schema) -> Res
     Ok(pruning)
 }
 
-fn col_as<'a, A: Array + 'static>(batch: &'a RecordBatch, name: &str) -> anyhow::Result<&'a A> {
-    let arr = batch
+fn col_as<'a, A: Array + 'static>(batch: &'a RecordBatch, name: &'static str) -> SinkResult<&'a A> {
+    let expected = std::any::type_name::<A>();
+    let err = SinkError::ColumnMismatch {
+        column: name,
+        expected,
+    };
+    batch
         .column_by_name(name)
-        .ok_or_else(|| anyhow::anyhow!("missing column `{name}`"))?;
-
-    let typed = arr
-        .as_any()
-        .downcast_ref::<A>()
-        .ok_or_else(|| anyhow::anyhow!("column `{name}` not a {}", std::any::type_name::<A>()))?;
-
-    Ok(typed)
+        .and_then(|arr| arr.as_any().downcast_ref::<A>())
+        .ok_or(err)
 }
 
 impl IcebergSink {
     /// Connects to the Lakekeeper REST catalog and makes sure the destination table exists.
-    pub async fn connect(cfg: IcebergConfig) -> Result<Self> {
+    pub async fn connect(cfg: IcebergConfig) -> SinkResult<Self> {
         let catalog: Arc<dyn Catalog> = Arc::new(
             RestCatalogBuilder::default()
                 .with_storage_factory(Arc::new(OpenDalStorageFactory::S3 {
                     customized_credential_load: None,
                 }))
                 .load("lakekeeper", catalog_props(&cfg))
-                .await
-                .context("failed to load lakekeeper REST catalog")?,
+                .await?,
         );
         Self::with_catalog(catalog, cfg).await
     }
 
     /// Same as [`Self::connect`] but against an already-built catalog (tests use the
     /// in-memory catalog; nothing else in the sink is REST-specific).
-    pub async fn with_catalog(catalog: Arc<dyn Catalog>, cfg: IcebergConfig) -> Result<Self> {
+    pub async fn with_catalog(catalog: Arc<dyn Catalog>, cfg: IcebergConfig) -> SinkResult<Self> {
         let ident = TableIdent::new(
             NamespaceIdent::new(cfg.namespace.clone()),
             cfg.table.clone(),
@@ -239,12 +332,8 @@ impl IcebergSink {
         &self.table
     }
 
-    pub async fn reload(&mut self) -> Result<()> {
-        self.table = self
-            .catalog
-            .load_table(&self.ident)
-            .await
-            .with_context(|| format!("failed to reload table {}", self.ident))?;
+    pub async fn reload(&mut self) -> SinkResult<()> {
+        self.table = self.catalog.load_table(&self.ident).await?;
         Ok(())
     }
 
@@ -258,7 +347,7 @@ impl IcebergSink {
         &self,
         incoming: &RecordBatch,
         schema: &arrow_schema::Schema,
-    ) -> Result<(datafusion::dataframe::DataFrame, ProbeStats)> {
+    ) -> SinkResult<(datafusion::dataframe::DataFrame, ProbeStats)> {
         let pruning = build_pruning_expr(incoming, schema)?;
         let probe = self.probe_stats(&pruning).await?;
         Ok((self.ctx.table("icetbl").await?.filter(pruning)?, probe))
@@ -268,7 +357,7 @@ impl IcebergSink {
         &self,
         incoming: &RecordBatch,
         schema: &arrow_schema::Schema,
-    ) -> Result<(Vec<RecordBatch>, ProbeStats)> {
+    ) -> SinkResult<(Vec<RecordBatch>, ProbeStats)> {
         self.ctx.register_batch("incoming", incoming.clone())?;
 
         let (cand, probe) = self.dedup_probe(incoming, schema).await?;
@@ -297,12 +386,8 @@ impl IcebergSink {
     ///
     /// Costs one metadata load plus one manifest planning pass per micro-batch; no data
     /// file is read twice, since this only walks manifests.
-    async fn probe_stats(&self, pruning: &Expr) -> Result<ProbeStats> {
-        let table = self
-            .catalog
-            .load_table(&self.ident)
-            .await
-            .context("failed to load table for probe statistics")?;
+    async fn probe_stats(&self, pruning: &Expr) -> SinkResult<ProbeStats> {
+        let table = self.catalog.load_table(&self.ident).await?;
 
         let mut scan = table.scan().select_all();
         if let Some(predicate) = convert_filters_to_predicate(std::slice::from_ref(pruning)) {
@@ -335,7 +420,7 @@ impl IcebergSink {
     /// messages, which turns the failure into JetStream redelivery instead of data loss.
     /// Data files written by a failed attempt become orphaned objects; that is the normal
     /// Iceberg trade-off and is reclaimed by table maintenance (`remove_orphan_files`).
-    pub async fn write_batch(&mut self, rows: &[TradeEvent]) -> Result<WriteStats> {
+    pub async fn write_batch(&mut self, rows: &[TradeEvent]) -> SinkResult<WriteStats> {
         if rows.is_empty() {
             return Ok(WriteStats::default());
         }
@@ -369,8 +454,10 @@ impl IcebergSink {
 
     /// The arrow schema [`Self::append_records`] accepts: the table's own schema, with the
     /// `PARQUET_FIELD_ID` metadata iceberg's writer matches on.
-    pub fn arrow_schema(&self) -> Result<Arc<arrow_schema::Schema>> {
-        schema::arrow_schema(self.table.metadata().current_schema())
+    pub fn arrow_schema(&self) -> SinkResult<Arc<arrow_schema::Schema>> {
+        Ok(schema::arrow_schema(
+            self.table.metadata().current_schema(),
+        )?)
     }
 
     /// Writes rows that are already arrow batches in the destination schema and commits them
@@ -384,13 +471,18 @@ impl IcebergSink {
     ///
     /// No dedup probe: the caller's query decides what the table lacks, and backfill
     /// anti-joins on `(exchange, symbol, trade_id)`.
-    pub async fn append_records(&mut self, batch: RecordBatch) -> Result<AppendStats> {
+    pub async fn append_records(&mut self, batch: RecordBatch) -> SinkResult<AppendStats> {
         if batch.num_rows() == 0 {
             return Ok(AppendStats::default());
         }
         let rows = batch.num_rows();
-        let batch = RecordBatch::try_new(self.arrow_schema()?, batch.columns().to_vec())
-            .context("input batch does not match the destination schema")?;
+        let batch =
+            RecordBatch::try_new(self.arrow_schema()?, batch.columns().to_vec()).map_err(|e| {
+                SinkError::RowsRefused {
+                    context: "column names, types or order differ",
+                    source: e,
+                }
+            })?;
 
         let write_start = Instant::now();
         let data_files = self.write_records(&batch).await?;
@@ -421,17 +513,25 @@ impl IcebergSink {
     async fn write_files(
         &self,
         rows: &[TradeEvent],
-    ) -> Result<(Vec<iceberg::spec::DataFile>, ProbeStats)> {
+    ) -> SinkResult<(Vec<iceberg::spec::DataFile>, ProbeStats)> {
         let arrow_schema = self.arrow_schema()?;
-        let batch = schema::to_record_batch(&arrow_schema, rows)?;
+        let batch =
+            schema::to_record_batch(&arrow_schema, rows).map_err(|e| SinkError::RowsRefused {
+                context: "the micro-batch does not fit the table schema",
+                source: e,
+            })?;
         let (remaining, probe) = self.deduped_batch(&batch, &arrow_schema).await?;
-        let deduped = concat_batches(&arrow_schema, &remaining)?;
+        let deduped =
+            concat_batches(&arrow_schema, &remaining).map_err(|e| SinkError::RowsRefused {
+                context: "the dedup output is not one schema",
+                source: e,
+            })?;
         Ok((self.write_records(&deduped).await?, probe))
     }
 
     /// Writes one batch out as one parquet file per `(exchange, day)` partition. Nothing is
     /// committed, so a failure here leaves only orphaned objects behind.
-    async fn write_records(&self, batch: &RecordBatch) -> Result<Vec<iceberg::spec::DataFile>> {
+    async fn write_records(&self, batch: &RecordBatch) -> SinkResult<Vec<iceberg::spec::DataFile>> {
         let metadata = self.table.metadata();
         let iceberg_schema = metadata.current_schema().clone();
         let partition_spec = metadata.default_partition_spec().clone();
@@ -439,11 +539,8 @@ impl IcebergSink {
         let splitter = iceberg::arrow::RecordBatchPartitionSplitter::try_new_with_computed_values(
             iceberg_schema.clone(),
             partition_spec,
-        )
-        .context("failed to build partition splitter")?;
-        let partitions = splitter
-            .split(batch)
-            .context("failed to split rows by partition")?;
+        )?;
+        let partitions = splitter.split(batch)?;
 
         let parquet_builder = ParquetWriterBuilder::new(
             writer_properties(&self.cfg.parquet_compression),
@@ -453,25 +550,18 @@ impl IcebergSink {
             parquet_builder,
             self.cfg.target_file_size,
             self.table.file_io().clone(),
-            DefaultLocationGenerator::new(metadata)
-                .context("failed to derive data location from table metadata")?,
+            DefaultLocationGenerator::new(metadata)?,
             self.file_name_gen.clone(),
         );
 
         let mut writer = FanoutWriter::new(DataFileWriterBuilder::new(rolling));
         for (partition_key, part) in partitions {
-            writer
-                .write(partition_key, part)
-                .await
-                .context("failed to write partition rows")?;
+            writer.write(partition_key, part).await?;
         }
-        writer
-            .close()
-            .await
-            .context("failed to close parquet writer")
+        Ok(writer.close().await?)
     }
 
-    async fn commit(&mut self, data_files: Vec<iceberg::spec::DataFile>) -> Result<()> {
+    async fn commit(&mut self, data_files: Vec<iceberg::spec::DataFile>) -> SinkResult<()> {
         if data_files.is_empty() {
             return Ok(());
         }
@@ -486,10 +576,12 @@ impl IcebergSink {
                 Err(err) => {
                     // Files are already on S3; retrying only replays the metadata commit.
                     if attempt >= self.cfg.commit_retries.max(1) {
-                        return Err(err).context(format!(
-                            "iceberg commit failed after {attempt} attempts ({} data files orphaned)",
-                            data_files.len()
-                        ));
+                        return Err(SinkError::Commit {
+                            ident: self.ident.to_string(),
+                            attempts: attempt,
+                            data_files: data_files.len(),
+                            source: Box::new(err),
+                        });
                     }
                     let backoff = Duration::from_millis(200 * 2u64.pow(attempt - 1));
                     tracing::warn!(
@@ -506,18 +598,12 @@ impl IcebergSink {
         }
     }
 
-    async fn commit_once(&self, data_files: Vec<iceberg::spec::DataFile>) -> Result<Table> {
+    async fn commit_once(&self, data_files: Vec<iceberg::spec::DataFile>) -> SinkResult<Table> {
         let tx = Transaction::new(&self.table);
         let action = tx.fast_append().add_data_files(data_files);
-        let tx = action
-            .apply(tx)
-            .map_err(|e| anyhow::anyhow!(e))
-            .context("failed to apply fast-append action")?;
+        let tx = action.apply(tx)?;
 
-        tx.commit(self.catalog.as_ref())
-            .map_err(|e| anyhow::anyhow!(e))
-            .await
-            .with_context(|| format!("failed to commit snapshot to {}", self.ident))
+        Ok(tx.commit(self.catalog.as_ref()).await?)
     }
 }
 
@@ -528,19 +614,16 @@ impl IcebergSink {
 async fn probe_view_provider(
     catalog: &Arc<dyn Catalog>,
     cfg: &IcebergConfig,
-) -> Result<Arc<dyn TableProvider>> {
-    let df_catalog = IcebergCatalogProvider::try_new(catalog.clone())
-        .await
-        .context("failed to expose the iceberg catalog to datafusion")?;
-    let schema = df_catalog
-        .schema(&cfg.namespace)
-        .with_context(|| format!("datafusion does not see namespace {}", cfg.namespace))?;
-    schema.table(&cfg.table).await?.with_context(|| {
-        format!(
-            "datafusion does not see table {}.{}",
-            cfg.namespace, cfg.table
-        )
-    })
+) -> SinkResult<Arc<dyn TableProvider>> {
+    let not_found = || SinkError::TableNotFound {
+        namespace: cfg.namespace.clone(),
+        table: cfg.table.clone(),
+    };
+    let df_catalog = IcebergCatalogProvider::try_new(catalog.clone()).await?;
+    // Both catalog levels answer absence with `None` (the schema lookup is not even
+    // fallible), so each needs the same explicit refusal.
+    let schema = df_catalog.schema(&cfg.namespace).ok_or_else(not_found)?;
+    schema.table(&cfg.table).await?.ok_or_else(not_found)
 }
 
 /// `total-data-files` of the current snapshot summary, which Iceberg maintains on every
@@ -597,7 +680,7 @@ async fn ensure_table(
     catalog: &Arc<dyn Catalog>,
     ident: &TableIdent,
     cfg: &IcebergConfig,
-) -> Result<Table> {
+) -> SinkResult<Table> {
     match catalog.load_table(ident).await {
         Ok(table) => Ok(table),
         // Catalogs differ here: Lakekeeper answers `TableNotFound` for a missing table,
@@ -609,33 +692,25 @@ async fn ensure_table(
             ) =>
         {
             tracing::info!(table = %ident, "table not found; creating it");
-            if !catalog
-                .namespace_exists(ident.namespace())
-                .await
-                .context("failed to check namespace existence")?
-            {
+            if !catalog.namespace_exists(ident.namespace()).await? {
                 catalog
                     .create_namespace(ident.namespace(), HashMap::new())
-                    .await
-                    .with_context(|| format!("failed to create namespace {}", ident.namespace()))?;
+                    .await?;
             }
 
             let creation = TableCreation::builder()
                 .name(ident.name().to_string())
-                .schema(schema::table_schema().context("failed to build trades schema")?)
-                .partition_spec(schema::unbound_partition_spec())
+                .schema(schema::table_schema()?)
+                .partition_spec(schema::unbound_partition_spec()?)
                 .properties([(
                     "write.parquet.compression-codec".to_string(),
                     cfg.parquet_compression.clone(),
                 )])
                 .build();
 
-            catalog
-                .create_table(ident.namespace(), creation)
-                .await
-                .with_context(|| format!("failed to create table {ident}"))
+            Ok(catalog.create_table(ident.namespace(), creation).await?)
         }
-        Err(err) => Err(anyhow::anyhow!(err).context(format!("failed to load table {ident}"))),
+        Err(err) => Err(SinkError::from(err)),
     }
 }
 
@@ -704,6 +779,73 @@ mod tests {
             Some("sk")
         );
         assert!(!props.contains_key("credential"));
+    }
+
+    // ---- error classification ---------------------------------------------------------
+    //
+    // These two predicates are the whole reason the sink has a typed error: the batch loop
+    // decides "wait for redelivery" vs "stop" from them. `Commit` in particular must classify
+    // as the error it carries, not as a kind of its own.
+
+    #[test]
+    fn commit_wrapper_classifies_like_the_error_it_carries() {
+        let conflict = iceberg::Error::new(
+            iceberg::ErrorKind::CatalogCommitConflicts,
+            "metadata moved under us",
+        )
+        .with_retryable(true);
+        assert!(SinkError::Iceberg(conflict).is_retryable());
+
+        let missing = || iceberg::Error::new(iceberg::ErrorKind::TableNotFound, "no such table");
+        let dropped = SinkError::Commit {
+            ident: "trades.trades".into(),
+            attempts: 3,
+            data_files: 7,
+            source: Box::new(SinkError::Iceberg(missing())),
+        };
+        assert!(!dropped.is_retryable(), "a dropped table is not an outage");
+        assert!(dropped.is_missing_table());
+        assert!(dropped.to_string().contains("3 attempts"), "{dropped}");
+        assert!(dropped.to_string().contains("orphaned"), "{dropped}");
+
+        assert!(!SinkError::Iceberg(missing()).is_retryable());
+        assert!(
+            !SinkError::Iceberg(iceberg::Error::new(
+                iceberg::ErrorKind::DataInvalid,
+                "field id 4 used twice",
+            ))
+            .is_missing_table()
+        );
+    }
+
+    /// datafusion 53 has no typed variant for absence, only this string — the assertion here is
+    /// what makes `is_missing_table`'s string match a known trade-off instead of a guess.
+    #[test]
+    fn datafusion_absence_is_a_string_and_other_plans_are_not() {
+        assert!(
+            SinkError::DataFusion(datafusion::error::DataFusionError::Plan(
+                "table 'icetbl' not found".into()
+            ))
+            .is_missing_table()
+        );
+        assert!(
+            !SinkError::DataFusion(datafusion::error::DataFusionError::Plan(
+                "no such function: f".into()
+            ))
+            .is_missing_table()
+        );
+    }
+
+    /// clippy's `result_large_err` threshold. `Commit` boxes its source so that every `?` in
+    /// the sink — and every await point in these futures — moves a pointer instead of an
+    /// iceberg error with a backtrace in it.
+    #[test]
+    fn error_stays_cheap_to_move() {
+        assert!(
+            std::mem::size_of::<SinkError>() <= 128,
+            "SinkError is {} bytes",
+            std::mem::size_of::<SinkError>()
+        );
     }
 
     // ---- dedup probe: does it really prune files? -------------------------------------

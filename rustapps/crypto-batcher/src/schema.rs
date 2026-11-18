@@ -27,7 +27,6 @@
 
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
 use arrow_array::builder::{
     BooleanBuilder, Float64Builder, Int64Builder, StringBuilder, TimestampMicrosecondBuilder,
 };
@@ -67,7 +66,7 @@ pub const ICEBERG_TZ: &str = "+00:00";
 pub const MICROS_PER_MILLI: i64 = 1_000;
 
 /// The Iceberg schema of the trades table (schema id 1, matching a freshly created table).
-pub fn table_schema() -> Result<IcebergSchema> {
+pub fn table_schema() -> iceberg::Result<IcebergSchema> {
     IcebergSchema::builder()
         .with_schema_id(1)
         .with_identifier_field_ids(vec![ID_EXCHANGE, ID_SYMBOL, ID_TRADE_ID])
@@ -131,32 +130,25 @@ pub fn table_schema() -> Result<IcebergSchema> {
             .into(),
         ])
         .build()
-        .context("failed to build trades iceberg schema")
 }
 
 /// Unbound partition spec used when *creating* the table: `identity(exchange), day(trade_ts)`.
-pub fn unbound_partition_spec() -> UnboundPartitionSpec {
-    iceberg::spec::UnboundPartitionSpec::builder()
-        .add_partition_field(ID_EXCHANGE, "exchange", Transform::Identity)
-        .expect("identity(exchange) is a valid partition field")
-        .add_partition_field(ID_TRADE_TS, "trade_ts_day", Transform::Day)
-        .expect("day(trade_ts) is a valid partition field")
-        .build()
+pub fn unbound_partition_spec() -> iceberg::Result<UnboundPartitionSpec> {
+    Ok(iceberg::spec::UnboundPartitionSpec::builder()
+        .add_partition_field(ID_EXCHANGE, "exchange", Transform::Identity)?
+        .add_partition_field(ID_TRADE_TS, "trade_ts_day", Transform::Day)?
+        .build())
 }
 
 /// Bound partition spec used when *writing* (transforms + partition paths).
-pub fn partition_spec(schema: &Arc<IcebergSchema>) -> Result<PartitionSpec> {
-    unbound_partition_spec()
-        .bind(schema.clone())
-        .context("failed to bind trades partition spec")
+pub fn partition_spec(schema: &Arc<IcebergSchema>) -> iceberg::Result<PartitionSpec> {
+    unbound_partition_spec()?.bind(schema.clone())
 }
 
 /// Arrow view of the Iceberg schema, carrying `PARQUET_FIELD_ID` metadata on every field
 /// (required by iceberg's default `FieldMatchMode::Id`).
-pub fn arrow_schema(schema: &IcebergSchema) -> Result<Arc<ArrowSchema>> {
-    Ok(Arc::new(
-        schema_to_arrow_schema(schema).context("failed to convert iceberg schema to arrow")?,
-    ))
+pub fn arrow_schema(schema: &IcebergSchema) -> iceberg::Result<Arc<ArrowSchema>> {
+    Ok(Arc::new(schema_to_arrow_schema(schema)?))
 }
 
 /// Turns a micro-batch of decoded trade events into one Arrow batch.
@@ -166,7 +158,7 @@ pub fn arrow_schema(schema: &IcebergSchema) -> Result<Arc<ArrowSchema>> {
 pub fn to_record_batch(
     arrow_schema: &Arc<ArrowSchema>,
     rows: &[TradeEvent],
-) -> Result<RecordBatch> {
+) -> std::result::Result<RecordBatch, arrow_schema::ArrowError> {
     let n = rows.len();
     let mut event_time = Int64Builder::with_capacity(n);
     // ~16 bytes of utf8 per symbol is generous for `BTCUSDT`-style tickers.
@@ -213,7 +205,6 @@ pub fn to_record_batch(
     ];
 
     RecordBatch::try_new(arrow_schema.clone(), columns)
-        .context("failed to build arrow record batch")
 }
 
 #[cfg(test)]

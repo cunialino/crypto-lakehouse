@@ -78,7 +78,8 @@ async fn main() -> Result<()> {
         // Fires once on SIGTERM/SIGINT; `run` then flushes the remainder and returns.
         let _ = shutdown_rx.changed().await;
     })
-    .await?;
+    .await
+    .context("batcher stopped on a failure that redelivery cannot fix")?;
 
     tracing::info!(
         batches = stats.batches,
