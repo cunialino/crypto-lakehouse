@@ -29,7 +29,7 @@ spec:
       # which also keeps the pod permanently NotReady under strategy: Recreate.
       initContainers:
         - name: init-table
-          image: custom.io/crypto-batcher:latest
+          image: custom.io/crypto-batcher:v0.3.0
           imagePullPolicy: Always
           args: ["--ensure-only"]
           envFrom:
@@ -47,7 +47,7 @@ spec:
 
       containers:
         - name: batcher
-          image: custom.io/crypto-batcher:latest
+          image: custom.io/crypto-batcher:v0.3.0
           imagePullPolicy: Always
           envFrom:
             - configMapRef:
