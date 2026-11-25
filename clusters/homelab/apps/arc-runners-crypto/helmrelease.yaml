@@ -15,8 +15,14 @@ spec:
   chart:
     spec:
       chart: gha-runner-scale-set
-      # pinned, never a semver range
-      version: 0.14.2
+      # pinned, never a semver range.
+      # 0.15.1 matches the controller (homelab's arc-controller) and its CRDs: apply homelab's
+      # CRD replacement first, or this apply fails like homelab's own scale set does, on
+      # ".spec.listenerConfig: field not declared in schema".
+      # The bump is also what brings the runner back: the live AutoscalingRunnerSet was deleted
+      # out from under this release (its EphemeralRunnerSets are orphaned) while helm still
+      # reports the release `deployed`, and a no-op upgrade does not re-create a missing object.
+      version: 0.15.1
       sourceRef:
         kind: HelmRepository
         name: actions-runner-controller-charts
