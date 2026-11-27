@@ -7,18 +7,16 @@ data:
   NATS_URL: "nats://nats-cluster.nats.svc.cluster.local:4222"
   TRADES_STREAM: "tradesstream"
   TRADES_SUBJECT_FILTER: "exchange.*"
-  # The durable consumer IS the pipeline offset; it is created if missing and its
-  # ack_wait / max_ack_pending are reconciled to the values below on every start.
+  # The durable consumer IS the pipeline offset, declared next to this file in consumer.yaml
+  # (jetstream-controller CR). The batcher reads that cursor and never creates or edits one,
+  # so redelivery is tuned there (ackWait, maxAckPending) and not here.
   BATCHER_CONSUMER: "iceberg-batcher"
   BATCHER_FETCH_BATCH: "2000"
   BATCHER_FETCH_EXPIRES_SECS: "2"
-  # Must stay well above BATCH_FLUSH_INTERVAL_SECS, otherwise JetStream redelivers rows the
-  # batcher is still holding and commits them twice on purpose. effective_ack_wait()
-  # (source.rs) enforces floor = flush_interval * 4 + 10s and only warns when it has to
-  # raise this, so keep it set explicitly instead of relying on the clamp.
-  # Cost of a larger value: rows buffered-but-unacked at crash time are only redelivered
-  # once ack_wait elapses, so a pod dying mid-batch delays that data by up to ~1 h.
-  BATCHER_ACK_WAIT_SECS: "3900"
+  # Every start, fit_batch_policy() (source.rs) caps this policy to what consumer.yaml's ack
+  # budget can hold: flush_interval <= (ackWait - 10s) / 4, max_records and fetch_batch <=
+  # maxAckPending / 2. A cap is logged as a warning and means the values below are no longer
+  # what runs. Raising them therefore means raising ackWait/maxAckPending in the same commit.
 
   # --- destination: Lakekeeper / Garage ---------------------------------------------
   LAKEKEEPER_URI: "http://lakekeeper.lakekeeper.svc.cluster.local:8181/catalog"

@@ -58,23 +58,28 @@ async fn main() -> Result<()> {
         table = format!("{}.{}", cfg.iceberg.namespace, cfg.iceberg.table),
         stream = %cfg.nats.stream,
         consumer = %cfg.nats.consumer,
-        max_records = cfg.batch.max_records,
-        max_bytes = cfg.batch.max_bytes,
-        flush_interval_ms = cfg.batch.flush_interval.as_millis() as u64,
-        dedup = cfg.batch.dedup,
         "starting crypto-batcher"
     );
 
     let mut sink = IcebergSink::connect(cfg.iceberg.clone()).await?;
 
-    let trades = source::spawn_nats_source(&cfg.nats, &cfg.batch)
+    // The consumer's ack budget caps the micro-batching, so the policy that runs is the one
+    // the source hands back rather than the ConfigMap's.
+    let (trades, policy) = source::spawn_nats_source(&cfg.nats, cfg.batch.clone())
         .await
         .context("failed to start nats source")?;
+    tracing::info!(
+        max_records = policy.max_records,
+        max_bytes = policy.max_bytes,
+        flush_interval_ms = policy.flush_interval.as_millis() as u64,
+        dedup = policy.dedup,
+        "micro-batching policy"
+    );
 
     let (shutdown_tx, mut shutdown_rx) = watch::channel(());
     spawn_signal_handler(shutdown_tx);
 
-    let stats = batcher::run(trades, &mut sink, cfg.batch.clone(), async move {
+    let stats = batcher::run(trades, &mut sink, policy, async move {
         // Fires once on SIGTERM/SIGINT; `run` then flushes the remainder and returns.
         let _ = shutdown_rx.changed().await;
     })

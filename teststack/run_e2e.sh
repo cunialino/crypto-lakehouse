@@ -122,6 +122,8 @@ fi
 log "cargo test (unit + in-memory pipeline)"
 cargo test -p crypto-batcher
 
+# The consumer is a jetstream-controller CR in the cluster and the batcher never writes one,
+# so live_stack.rs creates its own throwaway cursor before starting (hence the -e2e name).
 log "live stack integration test (publish -> batch -> commit -> scan)"
 NATS_URL="nats://127.0.0.1:${NATS_PORT}" \
 LAKEKEEPER_URI="http://127.0.0.1:${LK_PORT}/catalog" \

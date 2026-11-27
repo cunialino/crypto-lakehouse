@@ -9,21 +9,21 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 
 /// Where the batcher reads trades from.
+///
+/// Stream and consumer are both pre-existing: the batcher never creates or edits JetStream
+/// state. It reads `clusters/homelab/apps/batcher/consumer.yaml`'s consumer and lets that
+/// ack budget cap the [`BatchConfig`] it runs with (`source::fit_batch_policy`).
 #[derive(Debug, Clone)]
 pub struct NatsConfig {
     /// `nats://host:4222`
     pub url: String,
     /// JetStream stream to read (subjects `exchange.*`).
     pub stream: String,
-    /// Subject filter used by the durable consumer.
+    /// Subject filter the consumer must have, i.e. what `consumer.yaml: filterSubject`
+    /// is checked against.
     pub subject_filter: String,
     /// Durable pull consumer name. Owns the ack offset => this is the batcher's "cursor".
     pub consumer: String,
-    /// How long a fetched-but-unacked message may live before JetStream redelivers it.
-    ///
-    /// Must comfortably exceed `BatchConfig::flush_interval`, otherwise buffered messages
-    /// get redelivered while they are still waiting to be committed.
-    pub ack_wait: Duration,
     /// Max messages asked for in a single pull `fetch`.
     pub fetch_batch: usize,
     /// Long-poll time for a pull `fetch` when the stream is idle.
@@ -86,7 +86,7 @@ impl IcebergConfig {
 }
 
 /// The micro-batching policy itself.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct BatchConfig {
     /// Flush once this many rows are buffered.
     pub max_records: usize,
@@ -118,7 +118,6 @@ impl Config {
                 stream: string("TRADES_STREAM", "tradesstream"),
                 subject_filter: string("TRADES_SUBJECT_FILTER", "exchange.*"),
                 consumer: string("BATCHER_CONSUMER", "iceberg-batcher"),
-                ack_wait: seconds("BATCHER_ACK_WAIT_SECS", 300.),
                 fetch_batch: usize_env("BATCHER_FETCH_BATCH", 2_000),
                 fetch_expires: seconds("BATCHER_FETCH_EXPIRES_SECS", 2.),
             },

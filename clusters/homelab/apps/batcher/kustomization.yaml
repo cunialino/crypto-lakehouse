@@ -1,7 +1,10 @@
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 # The batcher is plain manifests: one Deployment, the ConfigMap that is its whole configuration,
-# and the Garage S3 Secret it reads through envFrom.
+# the Garage S3 Secret it reads through envFrom, and the JetStream Consumer whose ack floor is
+# the pipeline offset. Only the ConfigMap and the Deployment change together: the consumer is
+# reconciled by the jetstream-controller, and the batcher refuses to start if it disagrees with
+# the BATCH_* knobs instead of rewriting it.
 #
 # The Secret was an ExternalSecret with refreshInterval 10s, so a Bitwarden edit reached a fresh pod
 # within seconds. Under SOPS a rotation is a commit plus a Flux sync, and the same Garage key also
@@ -10,5 +13,6 @@ namespace: crypto-batcher
 resources:
   - namespace.yaml
   - secret-garage-s3-credentials.yaml
+  - consumer.yaml
   - batcher_config.yaml
   - batcher.yaml

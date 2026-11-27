@@ -16,6 +16,8 @@ use arrow_array::{Array, Int64Array, StringArray};
 use futures::TryStreamExt;
 use tokio::sync::watch;
 
+use async_nats::jetstream::consumer::{AckPolicy, DeliverPolicy};
+use async_nats::jetstream::stream::Stream;
 use crypto_batcher::batcher;
 use crypto_batcher::config::Config;
 use crypto_batcher::schema::TradeEvent;
@@ -56,6 +58,10 @@ async fn live_stack_end_to_end() {
         .expect("stream");
     stream.purge().await.ok(); // start from an empty stream for a deterministic count
 
+    // Creating the consumer is the jetstream-controller's job in-cluster, so the test does
+    // it here instead: the batcher only ever reads and validates what it points at.
+    ensure_test_consumer(&stream, &cfg).await;
+
     let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
@@ -86,11 +92,10 @@ async fn live_stack_end_to_end() {
         .await
         .expect("iceberg sink");
     let consumer_name = cfg.nats.consumer.clone();
-    let receiver = source::spawn_nats_source(&cfg.nats, &cfg.batch)
+    let (receiver, batch_cfg) = source::spawn_nats_source(&cfg.nats, cfg.batch.clone())
         .await
         .expect("nats source");
     let (shutdown_tx, mut shutdown_rx) = watch::channel(());
-    let batch_cfg = cfg.batch.clone();
     let run = tokio::spawn(async move {
         let mut sink = sink;
         batcher::run(receiver, &mut sink, batch_cfg, async move {
@@ -137,6 +142,134 @@ async fn live_stack_end_to_end() {
         "live e2e ok: published {publish_count} rows to {}, read {seen} back, stats {stats:?}",
         cfg.iceberg.table
     );
+}
+
+/// Creates the consumer the batcher points at, the way `consumer.yaml` does in-cluster.
+/// The batcher never writes JetStream state, so a live-stack run has to supply the cursor.
+///
+/// Recreated rather than reused: a durable consumer keeps whatever config it was created
+/// with and nothing here repairs it, so the run starts from exactly the shape below.
+async fn ensure_test_consumer(stream: &Stream, cfg: &Config) {
+    assert!(
+        cfg.nats.consumer.ends_with("-e2e") || cfg.nats.consumer.starts_with("it-"),
+        "live_stack needs a throwaway BATCHER_CONSUMER, not '{}'",
+        cfg.nats.consumer
+    );
+    stream.delete_consumer(&cfg.nats.consumer).await.ok();
+    stream
+        .get_or_create_consumer(
+            &cfg.nats.consumer,
+            async_nats::jetstream::consumer::pull::Config {
+                name: Some(cfg.nats.consumer.clone()),
+                durable_name: Some(cfg.nats.consumer.clone()),
+                filter_subject: cfg.nats.subject_filter.clone(),
+                deliver_policy: DeliverPolicy::All,
+                ack_policy: AckPolicy::Explicit,
+                ack_wait: Duration::from_secs(300),
+                max_deliver: -1,
+                max_ack_pending: 20_000,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("consumer");
+}
+
+type Breaker = Box<dyn Fn(&mut async_nats::jetstream::consumer::pull::Config)>;
+
+fn as_breaker(f: impl Fn(&mut async_nats::jetstream::consumer::pull::Config) + 'static) -> Breaker {
+    Box::new(f)
+}
+
+/// What reaches the batch loop is the consumer-capped policy, not the ConfigMap's — the
+/// pure `fit_batch_policy` test cannot show that the cap survives the real load path.
+#[tokio::test]
+#[ignore = "requires teststack/: NATS (see deploy/docs/rust-batcher-guide.md)"]
+async fn live_stack_caps_the_micro_batch_to_the_consumer() {
+    let mut cfg = Config::from_env().expect("config from env");
+    let js = async_nats::jetstream::new(
+        async_nats::connect(&cfg.nats.url)
+            .await
+            .expect("connect nats"),
+    );
+    let stream = js
+        .get_or_create_stream(async_nats::jetstream::stream::Config {
+            name: cfg.nats.stream.clone(),
+            subjects: vec!["exchange.*".into()],
+            ..Default::default()
+        })
+        .await
+        .expect("stream");
+    ensure_test_consumer(&stream, &cfg).await; // ack_wait 300 s, max_ack_pending 20 000
+
+    cfg.batch.flush_interval = Duration::from_secs(900);
+    cfg.batch.max_records = 50_000;
+    cfg.nats.fetch_batch = 20_000;
+
+    let (_receiver, policy) = source::spawn_nats_source(&cfg.nats, cfg.batch.clone())
+        .await
+        .expect("nats source");
+    assert_eq!(
+        policy.flush_interval,
+        Duration::from_secs(72),
+        "(300 s - 10 s) / 4"
+    );
+    assert_eq!(policy.max_records, 10_000, "max_ack_pending / 2");
+}
+
+/// The startup guard against a real server: a consumer whose config cannot carry the
+/// batching policy has to stop the process, not quietly duplicate or drop rows.
+#[tokio::test]
+#[ignore = "requires teststack/: NATS (see deploy/docs/rust-batcher-guide.md)"]
+async fn live_stack_refuses_a_consumer_that_contradicts_the_batching_policy() {
+    let mut cfg = Config::from_env().expect("config from env");
+    let js = async_nats::jetstream::new(
+        async_nats::connect(&cfg.nats.url)
+            .await
+            .expect("connect nats"),
+    );
+    let stream = js
+        .get_or_create_stream(async_nats::jetstream::stream::Config {
+            name: cfg.nats.stream.clone(),
+            subjects: vec!["exchange.*".into()],
+            ..Default::default()
+        })
+        .await
+        .expect("stream");
+
+    for (name, break_config) in [
+        // Would never see OKX trades.
+        (
+            "it-narrow-filter",
+            as_breaker(|c| c.filter_subject = "exchange.BINANCE".into()),
+        ),
+        // Would stall: one micro-batch alone exceeds the unacked cap.
+        ("it-starved", as_breaker(|c| c.max_ack_pending = 4)),
+    ] {
+        let mut config = async_nats::jetstream::consumer::pull::Config {
+            name: Some(name.to_string()),
+            durable_name: Some(name.to_string()),
+            filter_subject: cfg.nats.subject_filter.clone(),
+            ack_policy: AckPolicy::Explicit,
+            // Comfortably inside the policy, so only the break under test is reported.
+            ack_wait: Duration::from_secs(300),
+            max_ack_pending: 20_000,
+            ..Default::default()
+        };
+        break_config(&mut config);
+        // A durable consumer keeps the config it was created with, so start from a clean one.
+        stream.delete_consumer(name).await.ok();
+        stream
+            .get_or_create_consumer(name, config)
+            .await
+            .expect("broken consumer");
+
+        cfg.nats.consumer = name.to_string();
+        let Err(err) = source::spawn_nats_source(&cfg.nats, cfg.batch.clone()).await else {
+            panic!("consumer '{name}' contradicts the policy but the source started anyway");
+        };
+        println!("{name}: {err}");
+    }
 }
 
 /// Rows of `symbol` currently visible in the table: count + trade ids.

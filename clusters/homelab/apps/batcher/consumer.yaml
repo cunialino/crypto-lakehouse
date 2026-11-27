@@ -1,0 +1,43 @@
+# The batcher's offset. JetStream, not the batcher, remembers what has been committed to
+# Iceberg: a micro-batch is acked only after its snapshot commit lands, so this consumer's
+# ack floor is the pipeline's one and only piece of state. The batcher used to create and
+# reconcile it at startup; that job moved here so the offset's config is visible in Git and
+# the batcher needs no write access to it.
+#
+# ackWait and maxAckPending bound how much the batcher may hold unacked, so they bound its
+# micro-batches: at startup `fit_batch_policy` (rustapps/crypto-batcher/src/source.rs) caps
+# BATCH_FLUSH_INTERVAL_SECS at (ackWait - 10s) / 4 and BATCH_MAX_RECORDS and
+# BATCHER_FETCH_BATCH at maxAckPending / 2, warning about every cap it applies. Shrinking is
+# always the safe direction (more, smaller commits), so a tight consumer costs file counts
+# rather than correctness. As written the configured policy passes through untouched:
+#   ackWait 1h5m = 3900s      -> flush interval up to 972s (configured: 900s)
+#   maxAckPending 100000      -> batches up to 50000 rows (configured: 50000)
+# That is little slack: raising BATCH_MAX_RECORDS or BATCH_FLUSH_INTERVAL_SECS means raising
+# these with it, or the cap below silently becomes the real value. Tighten either far enough
+# that batches would fall under 30 s / 1000 rows and the batcher refuses to start instead of
+# committing per row — as it does for ackPolicy, maxDeliver and filterSubject, where no
+# batch size makes the consumer usable.
+apiVersion: jetstream.nats.io/v1beta2
+kind: Consumer
+metadata:
+  name: iceberg-batcher
+spec:
+  # The stream itself is declared in ../collector/streams.yaml (ns crypto-collector); the
+  # jetstream-controller resolves this name inside the NATS account, not per namespace.
+  streamName: tradesstream
+  durableName: iceberg-batcher
+  # Explicit acks are the offset, and redelivery is the only recovery path the pipeline
+  # has: never give up on a message, there is no dead-letter consumer to catch drops.
+  ackPolicy: explicit
+  maxDeliver: -1
+  deliverPolicy: all
+  filterSubject: exchange.*
+  # Too short and rows the batcher is still buffering get redelivered and committed twice;
+  # too long and rows buffered-but-unacked at crash time only come back once ackWait
+  # elapses, so a pod dying mid-batch delays that data by up to ~1 h.
+  ackWait: 1h5m
+  # Covers a full 50 000-row micro-batch plus the fetch filling it.
+  maxAckPending: 100000
+  # Deleting this consumer replays the stream's whole 72 h retention into the table — the
+  # dedup anti-join makes that harmless but slow, so require an explicit override.
+  preventDelete: true

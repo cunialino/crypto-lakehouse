@@ -21,7 +21,7 @@ Module map (`rustapps/crypto-batcher/src/`):
 | --- | --- |
 | `config.rs` | env → `NatsConfig` / `IcebergConfig` / `BatchConfig` |
 | `schema.rs` | the 11-column `trades` Iceberg schema, `identity(exchange), day(trade_ts)` spec, rows → `RecordBatch` |
-| `source.rs` | JetStream durable pull consumer, protobuf decode, `Ack` handle, consumer-config reconciliation |
+| `source.rs` | JetStream durable pull consumer, protobuf decode, `Ack` handle, capping the batching policy to the consumer's ack budget at startup |
 | `batcher.rs` | the accumulator (flush triggers, dedup) and the run loop (`flush` → commit → ack) |
 | `sink.rs` | REST catalog + S3 (opendal), table auto-create, dedup anti-join, parquet writing, retried `fast_append` commit |
 | `main.rs` | CLI, tracing, SIGTERM/SIGINT drain |
@@ -32,6 +32,18 @@ Module map (`rustapps/crypto-batcher/src/`):
   succeeds, so the only state the pipeline owns is the consumer's ack floor. A crash
   loses no data and needs no checkpoint replay: un-acked messages come back after
   `ack_wait`. This is the property that lets the whole Arroyo job/state disappear.
+* **The offset is declared, not provisioned.** `clusters/homelab/apps/batcher/consumer.yaml`
+  is a `Consumer` CR the jetstream-controller reconciles; the batcher only ever reads that
+  consumer, and that consumer's ack budget then decides how big a micro-batch may be
+  (`source::fit_batch_policy`): `flush_interval` is capped at `(ack_wait - 10 s) / 4`, since
+  a batch older than `ack_wait` is redelivered while it is still buffered, and
+  `max_records`/`fetch_batch` at `max_ack_pending / 2`, since more than that is never
+  delivered at all. Each cap logs a warning naming both knobs — a cap means the ConfigMap no
+  longer says what runs. Only what no batch size can work around stops the start: an
+  implicit ack, a push consumer, a bounded `max_deliver` (rows would land in a dead-letter
+  subject nobody reads), a narrower `filterSubject`, or an ack budget too small to write
+  Iceberg files at all (< 30 s or < 1000 rows per batch). There is no JetStream write path
+  in the binary, so it cannot move its own cursor or create a second one.
 * **One micro-batch = one snapshot.** Commits are atomic and visible immediately; there is
   no "files opened but never rolled" failure mode.
 * **Flush policy is size- AND age-bounded**, whichever of `BATCH_MAX_RECORDS`,
@@ -69,7 +81,7 @@ Module map (`rustapps/crypto-batcher/src/`):
 | `BATCHER_CONSUMER` | `iceberg-batcher` | durable consumer name = pipeline offset |
 | `BATCHER_FETCH_BATCH` | `2000` | messages per pull request |
 | `BATCHER_FETCH_EXPIRES_SECS` | `2` | pull long-poll |
-| `BATCHER_ACK_WAIT_SECS` | `300` | redelivery timer; auto-raised to `4 × flush_interval + 10 s` if too small |
+
 | `LAKEKEEPER_URI` | in-cluster lakekeeper | REST catalog uri |
 | `LAKEKEEPER_WAREHOUSE` | `crypto_lakehouse` | warehouse name |
 | `LAKEKEEPER_CREDENTIAL` | unset | `client_id:secret` for catalog OAuth2 |
@@ -80,9 +92,9 @@ Module map (`rustapps/crypto-batcher/src/`):
 | `ICEBERG_TARGET_FILE_SIZE` | `128MiB` | parquet roll size (accepts `128MiB`, `2GB`, raw bytes) |
 | `ICEBERG_PARQUET_COMPRESSION` | `zstd` | `zstd`, `snappy`, `gzip`, `lz4_raw`, `none` |
 | `COMMIT_RETRIES` | `5` | metadata commit attempts |
-| `BATCH_MAX_RECORDS` | `50000` | row trigger |
+| `BATCH_MAX_RECORDS` | `50000` | row trigger (capped at `max_ack_pending / 2`) |
 | `BATCH_MAX_BYTES` | `32MiB` | payload trigger |
-| `BATCH_FLUSH_INTERVAL_SECS` | `30` | age trigger |
+| `BATCH_FLUSH_INTERVAL_SECS` | `30` | age trigger (capped at `(ack_wait - 10 s) / 4`) |
 | `BATCH_DEDUP` | `true` | intra-batch dedup |
 
 `--ensure-only` connects, creates namespace/table if absent, prints the location and
@@ -115,11 +127,12 @@ cutover moved tables aside instead of writing into the old one.
 ## Deploy
 
 ```
-deploy/apps/crypto-lakehouse-batcher.yaml   ArgoCD Application → ns crypto-batcher
-deploy/base/batcher/kustomization.yaml
-deploy/base/batcher/batcher.yaml            Deployment (replicas: 1, strategy: Recreate)
-deploy/base/batcher/batcher_config.yaml     all knobs above
-deploy/base/batcher/garage_s3_secret.yaml   ExternalSecret → GARAGE_ACCESS_KEY/SECRET_KEY
+clusters/homelab/apps/batcher/kustomization.yaml                Flux app → ns crypto-batcher
+clusters/homelab/apps/batcher/namespace.yaml
+clusters/homelab/apps/batcher/consumer.yaml                     the offset, as a jetstream-controller CR
+clusters/homelab/apps/batcher/batcher.yaml                      Deployment (replicas: 1, strategy: Recreate)
+clusters/homelab/apps/batcher/batcher_config.yaml               all knobs above
+clusters/homelab/apps/batcher/secret-garage-s3-credentials.yaml SOPS secret → GARAGE_ACCESS_KEY/SECRET_KEY
 ```
 
 Image: `nix build .#dockerBatcher` (pushed as `192.168.0.2:5000/crypto-batcher` by the
@@ -132,6 +145,15 @@ Notes:
 * `replicas: 1` + `Recreate` on purpose: the offset is a single durable consumer, so two
   live replicas only fight over `max_ack_pending`. To scale, shard (e.g. one consumer +
   one table per exchange) rather than adding replicas.
+* `consumer.yaml` sets `preventDelete: true`, so an accidental prune of the app cannot take
+  the offset with it. `ackWait` and `maxAckPending` are retunable in place; `deliverPolicy`,
+  `filterSubject` and `ackPolicy` are not — JetStream refuses those, so the CR has to go
+  through a delete/recreate and the rebuilt consumer replays the whole 72 h retention
+  (which the dedup anti-join turns into a no-op, at the cost of time).
+* `consumer.yaml` has to exist before the batcher runs — it reads the consumer and never
+  creates one, so a missing cursor is a refused start naming the CR to apply. The same CR is
+  what a fresh cluster needs; the local `teststack/` has no controller, so `live_stack.rs`
+  creates a throwaway consumer (`BATCHER_CONSUMER` must end in `-e2e` or start with `it-`).
 * `terminationGracePeriodSeconds: 120` gives SIGTERM time to flush, commit and ack.
 * The sink creates the namespace/table on first run with the schema and partition spec
   above; nothing else has to be pre-created.
