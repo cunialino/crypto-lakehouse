@@ -7,7 +7,7 @@
 //!
 //! Creates the stream (`tradesstream`, subjects `exchange.*`) if it does not exist, which
 //! mirrors what the jetstream-controller does in-cluster
-//! (`deploy/base/collector/stream.yaml`).
+//! (`clusters/homelab/apps/collector/streams.yaml`).
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
